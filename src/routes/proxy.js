@@ -1,6 +1,5 @@
 import { Router } from "express";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import { get } from "curl-cffi-node";
 import { createGunzip, createInflate, createBrotliDecompress, gunzipSync } from "zlib";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
@@ -288,10 +287,16 @@ router.get("/vixsrc-stream.m3u8", async (req, res) => {
   if (!targetUrl) return res.status(400).json({ error: "Missing u param" });
   const proxyBase = getProxyBase(req);
   try {
-    const r = await get(targetUrl, { impersonate: "chrome124", headers: VIXSRC_HEADERS, timeout: 20, verify: false });
-    if (!r.ok) return res.status(r.status).json({ error: `vixsrc upstream: ${r.status}` });
-    let raw = r.buffer();
-    if (/gzip/i.test(r.headers.get("content-encoding") || "")) raw = gunzipSync(raw);
+    const r = await undiciRequest(targetUrl, {
+      method: "GET",
+      headers: VIXSRC_HEADERS,
+      signal: AbortSignal.timeout(20000),
+    });
+    if (r.statusCode >= 400) return res.status(r.statusCode).json({ error: `vixsrc upstream: ${r.statusCode}` });
+    const chunks = [];
+    for await (const chunk of r.body) chunks.push(chunk);
+    let raw = Buffer.concat(chunks);
+    if (/gzip/i.test(r.headers["content-encoding"] || "")) raw = gunzipSync(raw);
     const text = raw.toString("utf8");
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
@@ -303,42 +308,26 @@ router.get(["/vixsrc-seg", "/vixsrc-seg.m3u8"], async (req, res) => {
   const targetUrl = req.query.u ? decodeURIComponent(req.query.u) : null;
   if (!targetUrl) return res.status(400).json({ error: "Missing u param" });
   try {
-    const targetHost = new URL(targetUrl).hostname.toLowerCase();
-    const needsImpersonate = targetHost.endsWith("vixsrc.to");
-
-    let status, headers, body, ct, contentEncoding;
-    if (needsImpersonate) {
-      const r = await get(targetUrl, { impersonate: "chrome124", headers: VIXSRC_HEADERS, timeout: 30, verify: false });
-      if (!r.ok) return res.status(r.status).end();
-      ct = r.headers.get("content-type") ?? "";
-      contentEncoding = r.headers.get("content-encoding") ?? "";
-      status = r.status;
-      body = r.buffer();
-    } else {
-      const r = await undiciRequest(targetUrl, {
-        method: "GET",
-        headers: VIXSRC_HEADERS,
-        signal: AbortSignal.timeout(30000),
-      });
-      status = r.statusCode;
-      headers = r.headers;
-      if (status >= 400) return res.status(status).end();
-      ct = headers["content-type"] ?? "";
-      contentEncoding = headers["content-encoding"] ?? "";
-      body = r.body;
-    }
+    const r = await undiciRequest(targetUrl, {
+      method: "GET",
+      headers: VIXSRC_HEADERS,
+      signal: AbortSignal.timeout(30000),
+    });
+    const status = r.statusCode;
+    const headers = r.headers;
+    if (status >= 400) return res.status(status).end();
+    const ct = headers["content-type"] ?? "";
+    const contentEncoding = headers["content-encoding"] ?? "";
+    const body = r.body;
 
     const qIdx = targetUrl.indexOf("?");
     const targetPath = qIdx === -1 ? targetUrl : targetUrl.slice(0, qIdx);
     const isPlaylist = /mpegurl|x-mpegurl/i.test(ct) || targetPath.endsWith(".m3u8") || targetPath.endsWith(".m3u") || targetPath.endsWith(".txt");
     if (isPlaylist) {
       const proxyBase = getProxyBase(req);
-      let raw = Buffer.isBuffer(body) ? body : await body.arrayBuffer?.() ? Buffer.from(await body.arrayBuffer()) : null;
-      if (!raw) {
-        const chunks = [];
-        for await (const chunk of body) chunks.push(chunk);
-        raw = Buffer.concat(chunks);
-      }
+      const chunks = [];
+      for await (const chunk of body) chunks.push(chunk);
+      let raw = Buffer.concat(chunks);
       if (/gzip/i.test(contentEncoding)) raw = gunzipSync(raw);
       const text = raw.toString("utf8");
       res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
@@ -349,12 +338,8 @@ router.get(["/vixsrc-seg", "/vixsrc-seg.m3u8"], async (req, res) => {
     res.status(status);
     res.setHeader("Content-Type", ct || "video/mp2t");
     setCacheForResponse(res, ct || "video/mp2t", targetUrl);
-    if (Buffer.isBuffer(body)) {
-      res.send(body);
-    } else {
-      body.on("error", (err) => { console.error("[vixsrc-seg] pipe error:", err.message); if (!res.headersSent) res.status(502).end(); });
-      body.pipe(res);
-    }
+    body.on("error", (err) => { console.error("[vixsrc-seg] pipe error:", err.message); if (!res.headersSent) res.status(502).end(); });
+    body.pipe(res);
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 

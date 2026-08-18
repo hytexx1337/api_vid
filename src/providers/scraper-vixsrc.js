@@ -21,33 +21,9 @@
  * Devuelve: { masterUrl, subtitles: [{ lang, name, url }] }
  */
 
-import { get } from "curl-cffi-node";
-import { gunzipSync, brotliDecompressSync, inflateSync } from "zlib";
-
 const BASE = "https://vixsrc.to";
 const UA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const HEADERS = { "User-Agent": UA, "Referer": `${BASE}/` };
-
-function vixsrcFetch(targetUrl, signal) {
-  return get(targetUrl, { impersonate: "chrome124", headers: HEADERS, timeout: 20, verify: false });
-}
-
-async function responseText(r) {
-  let buf;
-  if (typeof r.buffer === "function") {
-    buf = r.buffer();
-  } else {
-    buf = Buffer.from(await r.arrayBuffer());
-  }
-  const ce = (r.headers.get("content-encoding") || "").toLowerCase();
-  const magic = Buffer.from(buf).slice(0, 4).toString("hex");
-  try {
-    if (ce.includes("gzip") || magic.startsWith("1f8b")) buf = gunzipSync(buf);
-    else if (ce.includes("br")) buf = brotliDecompressSync(buf);
-    else if (ce.includes("deflate")) buf = inflateSync(buf);
-  } catch {}
-  return buf.toString("utf8");
-}
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
 const _cache = new Map();
@@ -66,13 +42,9 @@ async function fetchEmbedId(tmdbId, type, season, episode) {
     ? `${BASE}/api/tv/${tmdbId}/${season}/${episode}`
     : `${BASE}/api/movie/${tmdbId}`;
 
-  const r = await vixsrcFetch(path, { signal: AbortSignal.timeout(10000) });
+  const r = await fetch(path, { headers: HEADERS, signal: AbortSignal.timeout(10000) });
   if (!r.ok) throw Object.assign(new Error(`vixsrc api HTTP ${r.status}`), { status: r.status });
-  const text = await responseText(r);
-  let json;
-  try { json = JSON.parse(text); } catch {
-    throw Object.assign(new Error(`vixsrc api no es JSON: ${text.slice(0, 200)}`), { status: 502 });
-  }
+  const json = await r.json();
   if (!json?.src) throw Object.assign(new Error("vixsrc: no src en respuesta"), { status: 502 });
 
   // src = "/embed/180649?token=...&expires=..."
@@ -83,9 +55,9 @@ async function fetchEmbedId(tmdbId, type, season, episode) {
 }
 
 async function fetchMasterPlaylistToken(embedId, embedUrl) {
-  const r = await vixsrcFetch(embedUrl, { signal: AbortSignal.timeout(10000) });
+  const r = await fetch(embedUrl, { headers: HEADERS, signal: AbortSignal.timeout(10000) });
   if (!r.ok) throw Object.assign(new Error(`vixsrc embed HTML HTTP ${r.status}`), { status: r.status });
-  const html = await responseText(r);
+  const html = await r.text();
 
   // window.masterPlaylist = { params: { 'token': 'xxx', 'expires': 'yyy' }, url: '...' }
   const token        = html.match(/'token'\s*:\s*'([a-f0-9]+)'/)?.[1];
@@ -94,11 +66,8 @@ async function fetchMasterPlaylistToken(embedId, embedUrl) {
                        ?? `${BASE}/playlist/${embedId}`;
   const thumbnailVtt = html.match(/window\.thumbnailsUrl\s*=\s*'([^']+)'/)?.[1] ?? null;
 
-  if (!token || !expires) {
-    // eslint-disable-next-line no-console
-    console.error("[vixsrc debug] embed HTML snippet:\n", html.slice(0, 800));
+  if (!token || !expires)
     throw Object.assign(new Error("vixsrc: no se encontró masterPlaylist en HTML"), { status: 502 });
-  }
 
   return { token, expires, urlBase, thumbnailVtt };
 }
@@ -106,9 +75,9 @@ async function fetchMasterPlaylistToken(embedId, embedUrl) {
 // Sigue un sub-M3U8 de subtítulo y extrae la URL del .vtt real
 async function resolveSubVtt(subM3u8Url) {
   try {
-    const r = await vixsrcFetch(subM3u8Url, { signal: AbortSignal.timeout(6000) });
+    const r = await fetch(subM3u8Url, { headers: HEADERS, signal: AbortSignal.timeout(6000) });
     if (!r.ok) return null;
-    const text = await responseText(r);
+    const text = await r.text();
     for (const line of text.split("\n")) {
       const t = line.trim();
       if (t && !t.startsWith("#")) return t;
@@ -143,10 +112,13 @@ export async function getVixsrcStream(tmdbId, type, season, episode) {
   const masterUrl = `${urlBase}${sep}token=${token}&expires=${expires}&h=1&lang=en`;
 
   // 3. Fetch del master M3U8
-  const m3u8Res = await vixsrcFetch(masterUrl, { signal: AbortSignal.timeout(10000) });
+  const m3u8Res = await fetch(masterUrl, {
+    headers: { "User-Agent": UA, "Accept": "*/*" },
+    signal: AbortSignal.timeout(10000),
+  });
   if (!m3u8Res.ok)
     throw Object.assign(new Error(`vixsrc playlist HTTP ${m3u8Res.status}`), { status: m3u8Res.status });
-  const m3u8 = await responseText(m3u8Res);
+  const m3u8 = await m3u8Res.text();
   if (!m3u8.startsWith("#EXTM3U"))
     throw Object.assign(new Error("vixsrc: respuesta no es M3U8"), { status: 502 });
 
