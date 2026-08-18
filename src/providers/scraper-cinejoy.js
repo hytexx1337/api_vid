@@ -5,7 +5,7 @@
 // vendor/cinejoy-crypto2.js (basado en el chunk DUnJ-byT.js de CineJoy) para
 // resolver /g y los endpoints de sources sin browser automation.
 
-import { D0 } from "../../../vendor/cinejoy-crypto2.js";
+import { D0 } from "../../vendor/cinejoy-crypto2.js";
 
 const FETCH_TIMEOUT = 30000;
 
