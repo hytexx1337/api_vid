@@ -20,7 +20,7 @@ module.exports = {
       name: "api-vid-miruro",
       script: "./src/providers/miruro/server.py",
       cwd: __dirname,
-      interpreter: "python",
+      interpreter: "python3",
       instances: 1,
       autorestart: true,
       watch: false,
