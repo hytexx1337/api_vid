@@ -12,7 +12,7 @@ export function normalizeLang(lang, originalProvider = "") {
   if (l === "japanese" || l === "jap" || l.startsWith("ja") || l.includes("jap")) {
     // Hardsub detection
     if (op.includes("animeav1")) return { lang: "JAP-ES-HS", langLabel: "Japonés (sub español quemado)" };
-    if (op.includes("miruro-kiwi") || op.includes("anikoto")) return { lang: "JAP-EN-HS", langLabel: "Japonés (sub inglés quemado)" };
+    if (op.includes("miruro") || op.includes("anikoto")) return { lang: "JAP-EN-HS", langLabel: "Japonés (sub inglés quemado)" };
     return { lang: "JAP-SUB", langLabel: "Japonés (sub por separado)" };
   }
 
