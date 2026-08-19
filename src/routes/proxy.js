@@ -198,10 +198,7 @@ router.get("/generic-seg", async (req, res) => {
       return res.send(rewriteGenericPlaylist(content, targetUrl, refEnc));
     }
     const isUltracloud = targetUrl.includes("ultracloud.cc") || targetUrl.includes("piltover.li");
-    const isFakeCt = ct.startsWith("image/") || ct.startsWith("text/html");
-    let forcedCt = ct || "video/mp2t";
-    if (isUltracloud) forcedCt = "application/octet-stream";
-    else if (isFakeCt) forcedCt = "video/mp2t";
+    let forcedCt = isUltracloud ? "application/octet-stream" : "video/mp2t";
     res.setHeader("Content-Type", forcedCt);
     setCacheForResponse(res, forcedCt, targetUrl);
     const reader = r.body.getReader();
