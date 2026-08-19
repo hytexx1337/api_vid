@@ -205,7 +205,7 @@ async function resolveAnimeData(anilistId, episode) {
 
   const latino = latinoResult.status === "fulfilled" ? latinoResult.value : null;
   const hasDubLatino = latino?.streams.some(s => s.type === "dub") ?? false;
-  const cuevanaStreams = (!hasDubLatino && cuevanaResult.status === "fulfilled") ? cuevanaResult.value : [];
+  const cuevanaStreams = cuevanaResult.status === "fulfilled" ? cuevanaResult.value : [];
   if (cuevanaResult.status === "rejected") console.warn(`[anime] embed69 ✗:`, cuevanaResult.reason?.message);
 
   const crTracks = crSubsResult.status === "fulfilled" && crSubsResult.value?.length ? crSubsResult.value : null;
@@ -255,7 +255,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   // animeav1
   if (latino) {
     for (const { url, type, server, provider: streamProvider, cfUrl, thumbnailVtt, thumbnailJpg } of latino.streams) {
-      const lang = type === "dub" ? "es-dub" : "ja-sub-lat";
+      const lang = type === "dub" ? "es-lat" : "ja-sub-lat";
       const originalProvider = streamProvider ?? (server > 1 ? `animeav1-s${server}` : "animeav1");
       const s = makeAnimeStream(proxyBase, url, "auto", lang, originalProvider);
       const upnStreamTarget = streamProvider === "upnshare" ? cfUrl : url;
