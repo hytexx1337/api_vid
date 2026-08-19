@@ -193,15 +193,19 @@ async function resolveAnimeData(anilistId, episode) {
     );
   };
 
-  const [latinoResult, megaplayResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult] = await Promise.allSettled([
+  const [latinoResult, megaplayResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult] = await Promise.allSettled([
     timed2("animeav1", getLatinoStream(anilistId, episode)),
     timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode))),
     timed2("cuevana", getCuevanaAnime(anilistId, parseInt(episode))),
     timed2("cr-subs", getCRSubsForAnime(anilistId, parseInt(episode))),
     timed2("miruro", getMiruroStreams(anilistId, parseInt(episode))),
     timed2("anikoto", getAnikotoStreams(anilistId, parseInt(episode))),
+    timed2("aniskip", anilistToMal(anilistId).then(malId => getAnimeSkip(malId, parseInt(episode)))),
   ]);
   lap("allSettled done");
+
+  const aniskip = aniskipResult.status === "fulfilled" ? aniskipResult.value : null;
+  if (aniskipResult.status === "rejected") console.warn("[anime] aniskip ✗:", aniskipResult.reason?.message);
 
   const latino = latinoResult.status === "fulfilled" ? latinoResult.value : null;
   const hasDubLatino = latino?.streams.some(s => s.type === "dub") ?? false;
@@ -217,7 +221,7 @@ async function resolveAnimeData(anilistId, episode) {
   const anikoto = anikotoResult.status === "fulfilled" ? anikotoResult.value : { sub: [], dub: [] };
   if (anikotoResult.status === "rejected") console.warn("[anime] anikoto ✗:", anikotoResult.reason?.message);
 
-  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto };
+  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip };
 }
 
 router.get("/anime/:anilistId/:episode", async (req, res) => {
@@ -233,7 +237,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     if (hasAny) cacheSet(cacheKey, data, STREAM_TTL);
   }
 
-  const { megaplayDub, megaplaySub, latino, cuevanaStreams, crTracks, miruro, anikoto } = data;
+  const { megaplayDub, megaplaySub, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip } = data;
   const tracks = await buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub);
 
   const streams = [];
@@ -314,6 +318,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   }
 
   if (streams.length === 0) return res.status(404).json({ error: "No streams found for this episode" });
+
+  if (aniskip) for (const s of streams) if (!s.skip) s.skip = aniskip;
 
   const sorted = sortStreams(streams);
   const isDubLang = (lang) => /DUB|LAT/.test(lang || "");
