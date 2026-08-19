@@ -272,20 +272,15 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     }
   }
 
-  const MEGAPLAY_DOMAINS = ["mewstream.buzz", "mewcdn.buzz", "nekostream.site", "cdn.mewstream"];
-  const isMegaplayDomain = (url) => MEGAPLAY_DOMAINS.some(d => url?.includes(d));
-
   // Miruro
+  const MIRURO_HIDDEN_PROVIDERS = new Set(["bee", "ally"]);
   for (const [miruroList, lang] of [
     [miruro?.dub ?? [], "en-dub"],
     [miruro?.sub ?? [], "japanese"],
   ]) {
     for (const miruroStream of miruroList) {
       if (!miruroStream?.url) continue;
-      if (miruroStream.provider === "bee" && isMegaplayDomain(miruroStream.originalUrl || miruroStream.url)) {
-        console.log(`[anime] miruro bee ${lang} duplica megaplay (${miruroStream.url.slice(0, 50)}) — skip`);
-        continue;
-      }
+      if (MIRURO_HIDDEN_PROVIDERS.has(miruroStream.provider)) continue;
       const originalProvider = `miruro-${miruroStream.provider}`;
       const s = makeAnimeStream(proxyBase, miruroStream.url, "auto", lang, originalProvider, {
         skip: miruroStream.skip && (miruroStream.skip.intro || miruroStream.skip.outro) ? miruroStream.skip : null,
@@ -321,7 +316,9 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   if (streams.length === 0) return res.status(404).json({ error: "No streams found for this episode" });
 
   const sorted = sortStreams(streams);
-  const withDisplay = assignDisplayProviders(sorted);
+  const isDubLang = (lang) => /DUB|LAT/.test(lang || "");
+  const grouped = [...sorted.filter(s => isDubLang(s.lang)), ...sorted.filter(s => !isDubLang(s.lang))];
+  const withDisplay = assignDisplayProviders(grouped);
   res.json(sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks }, proxyBase));
 });
 
