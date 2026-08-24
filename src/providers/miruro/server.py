@@ -2,6 +2,7 @@ import base64
 import gzip
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from curl_cffi import requests
 from flask import Flask, jsonify, request, Response
@@ -46,11 +47,11 @@ def get_proxy_host():
     return host
 
 
-def pipe(path, query):
+def pipe(path, query, timeout=15):
     payload = {"path": path, "method": "GET", "query": query, "body": None, "version": "0.1.0"}
     encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
 
-    res = requests.get(f"{PIPE_URL}?e={encoded}", headers=HEADERS, impersonate="chrome110", timeout=15)
+    res = requests.get(f"{PIPE_URL}?e={encoded}", headers=HEADERS, impersonate="chrome110", timeout=timeout)
     if res.status_code != 200:
         raise RuntimeError(f"pipe {path} failed: {res.status_code}")
 
@@ -136,28 +137,46 @@ def pick_stream(source):
     }
 
 
+def _fetch_source(provider, episode_id, anilist_id, category):
+    encoded_id = base64.urlsafe_b64encode(episode_id.encode()).decode().rstrip("=")
+    try:
+        # Timeout corto por provider: si uno cuelga (ej. kiwi con episodeIds
+        # stale) no debe arrastrar el resto ni acercarse al timeout de 20s
+        # que tiene el cliente Node (miruro.js).
+        source = pipe("sources", {
+            "episodeId": encoded_id,
+            "provider": provider,
+            "category": category,
+            "anilistId": anilist_id,
+        }, timeout=8)
+    except Exception:
+        return None
+
+    stream = pick_stream(source)
+    if stream:
+        stream["provider"] = provider
+    return stream
+
+
 def resolve_category(providers, anilist_id, episode_number, category):
-    results = []
+    tasks = []
     for provider in providers:
         episode_id = find_episode(providers, provider, category, episode_number)
-        if not episode_id:
-            continue
+        if episode_id:
+            tasks.append((provider, episode_id))
 
-        encoded_id = base64.urlsafe_b64encode(episode_id.encode()).decode().rstrip("=")
-        try:
-            source = pipe("sources", {
-                "episodeId": encoded_id,
-                "provider": provider,
-                "category": category,
-                "anilistId": anilist_id,
-            })
-        except Exception:
-            continue
+    if not tasks:
+        return []
 
-        stream = pick_stream(source)
-        if stream:
-            stream["provider"] = provider
-            results.append(stream)
+    results = []
+    # Providers en paralelo: el tiempo total pasa a ser ~max(latencias) en vez
+    # de la suma, así un provider colgado no bloquea a los demás.
+    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+        futures = [executor.submit(_fetch_source, provider, episode_id, anilist_id, category) for provider, episode_id in tasks]
+        for future in as_completed(futures):
+            stream = future.result()
+            if stream:
+                results.append(stream)
 
     return results
 
@@ -186,8 +205,11 @@ def watch(anilist_id, episode):
         decode_ids(episodes)
         providers = episodes.get("providers", {})
 
-        dub = resolve_category(providers, anilist_id, episode, "dub")
-        sub = resolve_category(providers, anilist_id, episode, "sub")
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            dub_future = executor.submit(resolve_category, providers, anilist_id, episode, "dub")
+            sub_future = executor.submit(resolve_category, providers, anilist_id, episode, "sub")
+            dub = dub_future.result()
+            sub = sub_future.result()
         return jsonify({"dub": dub, "sub": sub})
     except Exception as e:
         return jsonify({"error": str(e)}), 502
