@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
-import { cacheGet, cacheSet, timed } from "../lib/cache.js";
+import { cacheGet, cacheSet, timed, getR2Archive } from "../lib/cache.js";
+import { buildSignedR2Url } from "../lib/r2-seal.js";
+import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { getProxyBase } from "../lib/proxy.js";
 import { buildTracks, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel } from "../lib/subtitles.js";
 import { sealProxyUrls } from "../lib/proxy-seal.js";
@@ -42,6 +44,39 @@ router.use(createRateLimiter({ windowMs: 60_000, max: 60, message: "Too many str
 function handleError(res, err) {
   const status = err.status ?? 502;
   res.status(status).json({ error: err.message });
+}
+
+// ── Auto-archivado a R2 ──────────────────────────────────────────────────────
+// Mismo criterio de prioridad de provider por idioma que scripts/r2-select.js.
+const R2_AUTO_ARCHIVE_PRIORITY = {
+  "ESP-LAT": ["animeav1", "cuevana"],
+  "ENG-DUB": ["megaplay", "miruro", "anikoto"],
+};
+
+function pickArchiveCandidate(streams, lang, priorityList) {
+  const candidates = streams.filter((s) => s.lang === lang && s.originalProvider !== "zenkai" && s.proxy_url);
+  for (const prefix of priorityList) {
+    const match = candidates.find((s) => String(s.originalProvider || "").toLowerCase().includes(prefix));
+    if (match) return match;
+  }
+  return candidates[0] ?? null;
+}
+
+// Encola a R2 los idiomas que todavía no están archivados. proxy_url apunta
+// al dominio público (proxyBase); para el fetch interno del archivador se usa
+// loopback directo, evitando un salto de ida y vuelta por internet.
+function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase) {
+  const internalBase = `http://127.0.0.1:${process.env.PORT || 3005}`;
+  for (const [lang, priorityList] of Object.entries(R2_AUTO_ARCHIVE_PRIORITY)) {
+    if (r2Archived[lang]) continue;
+    if (isQueuedOrArchiving(anilistId, episode, lang)) continue;
+    const candidate = pickArchiveCandidate(streams, lang, priorityList);
+    if (!candidate) continue;
+    const streamUrl = candidate.proxy_url.startsWith(proxyBase)
+      ? internalBase + candidate.proxy_url.slice(proxyBase.length)
+      : candidate.proxy_url;
+    enqueueArchiveJob({ animeId: anilistId, episode, lang, streamUrl, sourceProvider: candidate.originalProvider });
+  }
 }
 
 async function buildMovieTvTracks(tmdbId, type, season, episode, proxyBase) {
@@ -242,6 +277,30 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
   const streams = [];
 
+  // Streams archivados en R2 (bucket propio, ver scripts/r2-select.js).
+  // Van primero en el array para quedar como "CPT CDN 1" de su idioma: no
+  // dependen de que el provider original siga vivo, no hace falta re-scrapear.
+  const R2_LANG_LABELS = { "ESP-LAT": "Español latino", "ENG-DUB": "Inglés (doblado)" };
+  const r2Archived = getR2Archive(anilistId, episode);
+  for (const [lang, entry] of Object.entries(r2Archived)) {
+    try {
+      const signedUrl = buildSignedR2Url(`${entry.slug}/master.m3u8`);
+      streams.push({
+        url: signedUrl,
+        quality: "auto",
+        lang,
+        langLabel: R2_LANG_LABELS[lang] || lang,
+        type: "hls",
+        provider: "zenkai",
+        originalProvider: "zenkai",
+        sourceProvider: entry.sourceProvider,
+        proxy_url: signedUrl,
+      });
+    } catch (e) {
+      console.warn(`[anime] r2 archive ${lang} sin firmar: ${e.message}`);
+    }
+  }
+
   // Megaplay DUB
   if (megaplayDub) {
     const s = makeAnimeStream(proxyBase, megaplayDub.url, "auto", "en-dub", "megaplay", { skip: Object.keys(megaplayDub.skip).length ? megaplayDub.skip : null });
@@ -318,6 +377,9 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   }
 
   if (streams.length === 0) return res.status(404).json({ error: "No streams found for this episode" });
+
+  // Fire-and-forget: no bloquea la respuesta, corre en background.
+  autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase);
 
   // Megaplay tiene los timestamps de intro/outro más precisos (por episodio,
   // no una estimación genérica). Se propagan a todos los streams del mismo

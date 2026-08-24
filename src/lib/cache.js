@@ -30,6 +30,18 @@ function initDb() {
         last_verified_at INTEGER NOT NULL
       );
     `);
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS r2_archive (
+        anime_id TEXT NOT NULL,
+        episode TEXT NOT NULL,
+        lang TEXT NOT NULL,
+        slug TEXT NOT NULL,
+        source_provider TEXT,
+        bytes INTEGER,
+        archived_at INTEGER NOT NULL,
+        PRIMARY KEY (anime_id, episode, lang)
+      );
+    `);
     return dbInstance;
   } catch (e) {
     console.warn("[cache] node:sqlite no disponible, cache persistente deshabilitada:", e.message);
@@ -138,6 +150,71 @@ export function invalidateStreamsContainingUrl(url) {
   } catch (e) {
     console.warn("[cache] invalidateStreamsContainingUrl error:", e.message);
     return 0;
+  }
+}
+
+// ── Archivos R2 (streams archivados de forma permanente) ────────────────────
+// slug es el prefijo de carpeta en R2 (ej: "21202-3-esp-lat"), donde vive
+// `${slug}/master.m3u8` + segmentos. No tiene TTL: el objeto queda ahí hasta
+// que se borre a mano o se reemplace.
+export function upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes }) {
+  if (!db) return false;
+  try {
+    db.prepare(`
+      INSERT INTO r2_archive (anime_id, episode, lang, slug, source_provider, bytes, archived_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(anime_id, episode, lang) DO UPDATE SET
+        slug = excluded.slug,
+        source_provider = excluded.source_provider,
+        bytes = excluded.bytes,
+        archived_at = excluded.archived_at
+    `).run(String(animeId), String(episode), lang, slug, sourceProvider ?? null, bytes ?? null, Date.now());
+    return true;
+  } catch (e) {
+    console.warn("[cache] upsertR2Archive error:", e.message);
+    return false;
+  }
+}
+
+// Devuelve un mapa { lang: { slug, sourceProvider, bytes, archivedAt } } para
+// un anime/episodio dado.
+export function getR2Archive(animeId, episode) {
+  if (!db) return {};
+  try {
+    const rows = db.prepare(
+      `SELECT lang, slug, source_provider, bytes, archived_at FROM r2_archive WHERE anime_id = ? AND episode = ?`
+    ).all(String(animeId), String(episode));
+    const out = {};
+    for (const r of rows) {
+      out[r.lang] = { slug: r.slug, sourceProvider: r.source_provider, bytes: r.bytes, archivedAt: r.archived_at };
+    }
+    return out;
+  } catch (e) {
+    console.warn("[cache] getR2Archive error:", e.message);
+    return {};
+  }
+}
+
+// Devuelve TODAS las filas de r2_archive (para export/migración entre entornos).
+export function listAllR2Archive() {
+  if (!db) return [];
+  try {
+    return db.prepare(
+      `SELECT anime_id, episode, lang, slug, source_provider, bytes, archived_at FROM r2_archive`
+    ).all();
+  } catch (e) {
+    console.warn("[cache] listAllR2Archive error:", e.message);
+    return [];
+  }
+}
+
+export function deleteR2Archive(animeId, episode, lang) {
+  if (!db) return;
+  try {
+    if (lang) db.prepare(`DELETE FROM r2_archive WHERE anime_id = ? AND episode = ? AND lang = ?`).run(String(animeId), String(episode), lang);
+    else db.prepare(`DELETE FROM r2_archive WHERE anime_id = ? AND episode = ?`).run(String(animeId), String(episode));
+  } catch (e) {
+    console.warn("[cache] deleteR2Archive error:", e.message);
   }
 }
 

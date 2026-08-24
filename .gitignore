@@ -1,6 +1,7 @@
 node_modules/
 subs-cache/
 data/
+r2-archive-export.json
 __pycache__/
 .vscode/
 .DS_Store

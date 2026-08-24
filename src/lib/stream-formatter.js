@@ -199,6 +199,10 @@ export function sortStreams(streams) {
 export function assignDisplayProviders(streams, prefix = "CPT CDN") {
   const counters = new Map();
   return streams.map((s) => {
+    // Los streams archivados en R2 (nuestro propio storage) mantienen su
+    // provider real en vez de camuflarse como "CPT CDN N": no dependen de
+    // ningún origin externo, tiene sentido que se distingan del resto.
+    if (s.originalProvider === "zenkai") return s;
     const lang = s.lang || "unknown";
     const n = (counters.get(lang) || 0) + 1;
     counters.set(lang, n);
