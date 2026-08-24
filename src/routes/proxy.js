@@ -12,6 +12,7 @@ import { request as undiciRequest } from "undici";
 import { SUBS_DIR } from "../lib/subtitles.js";
 import { removeSpamLines } from "../lib/subtitle-cleaner.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
+import { invalidateStreamsContainingUrl } from "../lib/cache.js";
 
 const router = Router();
 
@@ -139,7 +140,10 @@ router.get("/generic-stream.m3u8", async (req, res) => {
   setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
   try {
     const r = await fetch(targetUrl, { headers: genericHeaders(referer), signal: AbortSignal.timeout(20000) });
-    if (!r.ok) return res.status(502).json({ error: `generic upstream: ${r.status}` });
+    if (!r.ok) {
+      if (r.status === 403 || r.status === 404) invalidateStreamsContainingUrl(targetUrl);
+      return res.status(502).json({ error: `generic upstream: ${r.status}` });
+    }
     const refEnc = referer ? `&ref=${encodeURIComponent(referer)}` : "";
     const master = await r.text();
     const isMaster = master.includes("#EXT-X-STREAM-INF");
@@ -188,7 +192,10 @@ router.get("/generic-seg", async (req, res) => {
   const isPlaylist = /\.m3u8(\?|$)/i.test(targetUrl.split("?")[0]);
   try {
     const r = await fetch(targetUrl, { headers: genericHeaders(referer), signal: AbortSignal.timeout(20000) });
-    if (!r.ok) return res.status(r.status).end();
+    if (!r.ok) {
+      if (r.status === 403 || r.status === 404) invalidateStreamsContainingUrl(targetUrl);
+      return res.status(r.status).end();
+    }
     const ct = r.headers.get("content-type") ?? "";
     if (ct.includes("mpegurl") || ct.includes("x-mpegurl") || isPlaylist) {
       const refEnc = referer ? `&ref=${encodeURIComponent(referer)}` : "";

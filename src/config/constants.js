@@ -49,7 +49,7 @@ export const HEADERS = {
 
 export const TMDB_BEARER = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyMjYwNmNlMmU2MTJkOGQyYzQyNzhmYWNhNDE5Y2VjMSIsIm5iZiI6MTc1ODk0Njk4NC4yOTcsInN1YiI6IjY4ZDc2NmE4NWFmYjU3ZjJjZTUyZmMzZCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.-KoF5Nloah5nLAlONDasUwMb9OUS_LbawNd8mdRGNBg";
 
-export const STREAM_TTL = 2 * 24 * 60 * 60 * 1000; // 2 días
+export const STREAM_TTL = 7 * 24 * 60 * 60 * 1000; // 7 días (persistido en disco, ver lib/cache.js)
 export const SUB_TTL = 3 * 60 * 60 * 1000; // 3h
 export const PROVIDER_TTL = 3 * 60 * 60 * 1000; // 3h
 

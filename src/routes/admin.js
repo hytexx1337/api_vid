@@ -2,8 +2,26 @@ import express, { Router } from "express";
 import path from "path";
 import { existsSync } from "fs";
 import { readVdrkIndex, writeVdrkIndex, readCrIndex, writeCrIndex } from "../lib/subtitles.js";
+import { listPersistedKeys, cacheDelete } from "../lib/cache.js";
+import { verifyAnimeCache } from "../lib/stream-verifier.js";
 
 const router = Router();
+
+router.get("/admin/api/stream-cache", (req, res) => {
+  res.json({ keys: listPersistedKeys("streams:") });
+});
+
+router.delete("/admin/api/stream-cache/:key", (req, res) => {
+  cacheDelete(decodeURIComponent(req.params.key));
+  res.json({ ok: true });
+});
+
+router.post("/admin/api/verify-anime-cache", async (req, res) => {
+  try {
+    const result = await verifyAnimeCache();
+    res.json({ ok: true, ...result });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 router.get("/admin/subs", (req, res) => {
   const html = path.join(process.cwd(), "..", "admin-subs.html");

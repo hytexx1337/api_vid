@@ -6,6 +6,7 @@ import subtitlesRouter from "./routes/subtitles.js";
 import providersRouter from "./routes/providers.js";
 import debugRouter from "./routes/debug.js";
 import adminRouter from "./routes/admin.js";
+import { scheduleAnimeVerifier } from "./lib/stream-verifier.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -82,6 +83,7 @@ process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]
 // ── Start ──────────────────────────────────────────────────────────────────────
 const server = app.listen(PORT, () => {
   console.log(`api_vid running on http://localhost:${PORT} [pid ${process.pid}]`);
+  scheduleAnimeVerifier();
 });
 
 function shutdown() {

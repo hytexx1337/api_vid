@@ -319,10 +319,21 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
   if (streams.length === 0) return res.status(404).json({ error: "No streams found for this episode" });
 
-  if (aniskip) for (const s of streams) if (!s.skip) s.skip = aniskip;
+  // Megaplay tiene los timestamps de intro/outro más precisos (por episodio,
+  // no una estimación genérica). Se propagan a todos los streams del mismo
+  // grupo dub/sub: megaplayDub.skip -> ESP-LAT, ENG-DUB, etc; megaplaySub.skip
+  // -> JAP-SUB, JAP-ES-HS, JAP-EN-HS. aniskip queda como último fallback solo
+  // si megaplay no tiene datos para ese grupo.
+  const isDubLang = (lang) => /DUB|LAT/.test(lang || "");
+  const megaplayDubSkip = megaplayDub && Object.keys(megaplayDub.skip || {}).length ? megaplayDub.skip : null;
+  const megaplaySubSkip = megaplaySub && Object.keys(megaplaySub.skip || {}).length ? megaplaySub.skip : null;
+  for (const s of streams) {
+    const preferred = isDubLang(s.lang) ? megaplayDubSkip : megaplaySubSkip;
+    if (preferred) s.skip = preferred;
+    else if (!s.skip && aniskip) s.skip = aniskip;
+  }
 
   const sorted = sortStreams(streams);
-  const isDubLang = (lang) => /DUB|LAT/.test(lang || "");
   const grouped = [...sorted.filter(s => isDubLang(s.lang)), ...sorted.filter(s => !isDubLang(s.lang))];
   const withDisplay = assignDisplayProviders(grouped);
   res.json(sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks }, proxyBase));

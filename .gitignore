@@ -1,5 +1,6 @@
 node_modules/
 subs-cache/
+data/
 __pycache__/
 .vscode/
 .DS_Store
