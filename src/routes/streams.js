@@ -66,7 +66,7 @@ function pickArchiveCandidate(streams, lang, priorityList) {
 // al dominio público (proxyBase); para el fetch interno del archivador se usa
 // loopback directo, evitando un salto de ida y vuelta por internet.
 function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase) {
-  const internalBase = `http://127.0.0.1:${process.env.PORT || 3005}`;
+  const internalBase = `http://127.0.0.1:${process.env.PORT || 8000}`;
   for (const [lang, priorityList] of Object.entries(R2_AUTO_ARCHIVE_PRIORITY)) {
     if (r2Archived[lang]) continue;
     if (isQueuedOrArchiving(anilistId, episode, lang)) continue;
