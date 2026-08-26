@@ -303,6 +303,26 @@ function playToM3U8(url) {
   return url.replace("/play/", "/m3u8/");
 }
 
+// Extrae los links de descarga directa (Mega, 1Fichier, MP4Upload, StreamTape, etc.)
+// embebidos en el HTML bajo `downloads:{SUB:[{server,url}],DUB:[{server,url}]}`.
+function extractDownloadLinks(html) {
+  const downloadsMatch = html.match(/downloads:\{(SUB:\[.*?\],DUB:\[.*?\]|DUB:\[.*?\],SUB:\[.*?\]|SUB:\[.*?\]|DUB:\[.*?\])\}/);
+  if (!downloadsMatch) return { sub: [], dub: [] };
+  const block = downloadsMatch[1];
+
+  const extract = (section) => {
+    const m = block.match(new RegExp(`${section}:\\[([^\\]]*)\\]`));
+    if (!m) return [];
+    const items = [];
+    const re = /\{server:"([^"]+)",url:"([^"]+)"\}/g;
+    let mm;
+    while ((mm = re.exec(m[1])) !== null) items.push({ server: mm[1], url: mm[2] });
+    return items;
+  };
+
+  return { sub: extract("SUB"), dub: extract("DUB") };
+}
+
 // ── Scraper principal ─────────────────────────────────────────────────────────
 
 async function scrapeM3U8(slug, episode) {
@@ -333,6 +353,7 @@ async function scrapeM3U8(slug, episode) {
   const subUrls    = extractAllHlsUrls(html, "SUB");
   const dubUpnUrls = extractUpnShareUrls(html, "DUB");
   const subUpnUrls = extractUpnShareUrls(html, "SUB");
+  const downloads  = extractDownloadLinks(html);
 
   console.log(`[scraper] slug=${slug} ep=${usedEp} | DUB HLS=${dubUrls.length} UPN=${dubUpnUrls.length} | SUB HLS=${subUrls.length} UPN=${subUpnUrls.length}`);
 
@@ -378,9 +399,10 @@ async function scrapeM3U8(slug, episode) {
   // TTL corto porque UPNShare firma la URL con un token (pk.kx) que expira en ~25-30 min;
   // cachear por 4hs serviría cf-master URLs muertas (403) la mayor parte del tiempo.
   const streamsTtl = 15 * 60 * 1000;
-  cacheSet(cacheKey, streams, streamsTtl);
-  if (usedEp !== epNum) cacheSet(`m3u8:${slug}:${usedEp}`, streams, streamsTtl);
-  return streams;
+  const result = { streams, downloads };
+  cacheSet(cacheKey, result, streamsTtl);
+  if (usedEp !== epNum) cacheSet(`m3u8:${slug}:${usedEp}`, result, streamsTtl);
+  return result;
 }
 
 // ── Detección de split-cours: offset de episodios ────────────────────────────
@@ -515,8 +537,8 @@ export async function getLatinoStream(anilistId, episode) {
   const epNum = Number(episode) + offset;
   if (offset > 0) console.log(`[scraper] split-cours: ep local ${episode} → ep animeav1 ${epNum} (offset=${offset})`);
 
-  const streams = await scrapeM3U8(slug, epNum);
+  const { streams, downloads } = await scrapeM3U8(slug, epNum);
   lap("scrapeM3U8");
 
-  return { slug, malId, offset, episodeOnPage: epNum, streams };
+  return { slug, malId, offset, episodeOnPage: epNum, streams, downloads };
 }

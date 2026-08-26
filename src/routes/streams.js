@@ -16,6 +16,7 @@ import {
   sortStreams,
   assignDisplayProviders,
   mapMovieTvLang,
+  normalizeLang,
 } from "../lib/stream-formatter.js";
 import { fetchTmdbMeta } from "../metadata/tmdb.js";
 import { anilistToMal, getAnimeSkip, getIntroSkip } from "../metadata/anilist.js";
@@ -263,7 +264,9 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
 
-  const cacheKey = `streams:anime:${anilistId}:${episode}`;
+  // v2: agrega extracción de `downloads` (animeav1 + miruro/kiwi/ally) — bump
+  // para invalidar entradas persistidas de antes de este cambio.
+  const cacheKey = `streams:anime:v2:${anilistId}:${episode}`;
   let data = cacheGet(cacheKey);
 
   if (!data) {
@@ -315,6 +318,14 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     streams.push(s);
   }
 
+  // animeav1 — links de descarga directa (Mega, 1Fichier, MP4Upload, StreamTape)
+  const downloads = [];
+  for (const [list, type] of [[latino?.downloads?.dub ?? [], "dub"], [latino?.downloads?.sub ?? [], "sub"]]) {
+    if (!list.length) continue;
+    const { lang, langLabel } = normalizeLang(type === "dub" ? "es-lat" : "japanese", "animeav1");
+    for (const { server, url } of list) downloads.push({ lang, langLabel, server, url });
+  }
+
   // animeav1
   if (latino) {
     for (const { url, type, server, provider: streamProvider, cfUrl, thumbnailVtt, thumbnailJpg } of latino.streams) {
@@ -343,8 +354,16 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   ]) {
     for (const miruroStream of miruroList) {
       if (!miruroStream?.url) continue;
-      if (MIRURO_HIDDEN_PROVIDERS.has(miruroStream.provider)) continue;
       const originalProvider = `miruro-${miruroStream.provider}`;
+
+      // Link de descarga directa (pahe.win, bysekoze.com, etc) — independiente
+      // de si el stream del provider está oculto/roto para reproducción directa.
+      if (miruroStream.download) {
+        const { lang: dlLang, langLabel: dlLangLabel } = normalizeLang(lang, originalProvider);
+        downloads.push({ lang: dlLang, langLabel: dlLangLabel, server: miruroStream.provider, url: miruroStream.download });
+      }
+
+      if (MIRURO_HIDDEN_PROVIDERS.has(miruroStream.provider)) continue;
       const s = makeAnimeStream(proxyBase, miruroStream.url, "auto", lang, originalProvider, {
         skip: miruroStream.skip && (miruroStream.skip.intro || miruroStream.skip.outro) ? miruroStream.skip : null,
         headers: Object.keys(miruroStream.headers ?? {}).length ? miruroStream.headers : null,
@@ -398,7 +417,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const sorted = sortStreams(streams);
   const grouped = [...sorted.filter(s => isDubLang(s.lang)), ...sorted.filter(s => !isDubLang(s.lang))];
   const withDisplay = assignDisplayProviders(grouped);
-  res.json(sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks }, proxyBase));
+  res.json(sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks, downloads }, proxyBase));
 });
 
 export default router;

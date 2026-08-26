@@ -134,6 +134,7 @@ def pick_stream(source):
         "proxyUrl": build_proxy_url(stream["url"], referer),
         "headers": {"Referer": referer, "Origin": referer.rstrip("/")} if referer else {},
         "subtitles": subs,
+        "download": source.get("download"),
     }
 
 

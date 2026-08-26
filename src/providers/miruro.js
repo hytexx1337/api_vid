@@ -26,6 +26,7 @@ function normalizeStream(raw, category) {
     // Los subs de Miruro vienen quemados; no los usamos como tracks globales
     tracks: [],
     category,
+    download: raw.download || null,
   };
 }
 
