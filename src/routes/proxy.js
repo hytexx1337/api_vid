@@ -581,9 +581,16 @@ router.get("/ghost-proxy", async (req, res) => {
 
 // ── Sealed proxy endpoint ─────────────────────────────────────────────────────
 router.get("/sealed/:token", async (req, res, next) => {
+  const token = String(req.params.token).replace(/\.m3u8$/i, "");
+  let originalPath;
   try {
-    const token = String(req.params.token).replace(/\.m3u8$/i, "");
-    const originalPath = unsealProxyPath(token);
+    originalPath = unsealProxyPath(token);
+  } catch {
+    // Token inválido/truncado (bots/scanners probando paths al azar, o un
+    // link viejo). No es un error de servidor real: 400 y sin log de stack.
+    return res.status(400).json({ error: "invalid or expired token" });
+  }
+  try {
     const internalUrl = `http://127.0.0.1:${req.socket.localPort}${originalPath}${originalPath.includes("?") ? "&" : "?"}_cb=${Date.now()}`;
     const proxyBase = getProxyBase(req);
     const headers = { ...req.headers };
