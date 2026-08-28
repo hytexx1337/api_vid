@@ -234,11 +234,37 @@ export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null
       // Si el split en ":" da menos de 4 chars (ej: "Re" de "Re:Zero"),
       // usar el título completo sin el número de temporada para mejor coincidencia.
       const splitColon = malTitle.split(":")[0].trim();
+      const afterColon = malTitle.slice(splitColon.length + 1).trim();
       const keywords   = splitColon.length >= 4
         ? splitColon
         : malTitle.replace(/\b\d+(?:st|nd|rd|th)\s+season\b/gi, "").replace(/[!]/g, "").trim();
+
+      // El buscador de animeav1 pagina/rankea mal queries genéricas (ej.
+      // "Dragon Ball Z" no trae especiales/OVAs entre los primeros resultados).
+      // Si el título tiene ":", la parte de DESPUÉS suele ser el subtítulo que
+      // distingue al especial/película del resto — probarla da mejores hits
+      // (ej. "Bardock – The Father of Goku" encuentra el especial que
+      // "Dragon Ball Z" solo no encuentra).
+      let slug = null;
       const results = await searchAnimeav1(keywords);
-      const slug    = pickBestSlug(results, malTitle);
+      slug = pickBestSlug(results, malTitle);
+
+      // Si la query genérica no matchea (típico de especiales/OVAs, donde lo
+      // que distingue al título está justo DESPUÉS de los ":"), reintentar
+      // con esa parte específica. Ojo: NO reusamos el Jaccard de pickBestSlug
+      // acá — compara contra el título en inglés/romaji, y si el título
+      // mostrado en animeav1 está en español (común en specials/películas)
+      // puede preferir por error otro resultado que comparte palabras en
+      // inglés (ej. "Bardock") aunque sea un anime distinto. Al ser una
+      // query ya acotada a propósito, confiamos directo en el ranking de
+      // animeav1 cuando devuelve pocos resultados.
+      if (!slug && afterColon.length >= 4) {
+        const narrowResults = await searchAnimeav1(afterColon);
+        if (narrowResults.length > 0 && narrowResults.length <= 2) {
+          slug = narrowResults[0].slug;
+          console.log(`[scraper] malId=${malId} → match por ranking (query específica "${afterColon}"): "${slug}"`);
+        }
+      }
       if (slug) {
         console.log(`[scraper] malId=${malId} → "${malTitle}" → slug="${slug}"`);
         cacheSet(key, slug, 7 * 24 * 60 * 60 * 1000);
