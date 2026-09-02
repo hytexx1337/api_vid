@@ -12,6 +12,8 @@
  * para servir los segmentos HLS.
  */
 
+import { ANILIST_HEADERS } from "../config/constants.js";
+
 const BASE     = "https://megaplay.buzz";
 const VIDWISH  = "https://vidwish.live";
 const UA       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
@@ -50,7 +52,7 @@ async function anilistToMal(anilistId) {
   try {
     const r = await fetch("https://graphql.anilist.co", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      headers: ANILIST_HEADERS,
       body: JSON.stringify({ query: "query($id:Int){Media(id:$id){idMal}}", variables: { id: Number(anilistId) } }),
       signal: AbortSignal.timeout(8000),
     });

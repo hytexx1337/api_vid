@@ -1,4 +1,5 @@
 import { cacheGet, cacheSet } from "../lib/cache.js";
+import { ANILIST_HEADERS } from "../config/constants.js";
 
 export async function anilistToMal(anilistId) {
   const cacheKey = `mal:${anilistId}`;
@@ -7,7 +8,7 @@ export async function anilistToMal(anilistId) {
 
   const r = await fetch("https://graphql.anilist.co", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    headers: ANILIST_HEADERS,
     body: JSON.stringify({
       query: "query($id:Int){Media(id:$id,type:ANIME){idMal}}",
       variables: { id: parseInt(anilistId) },

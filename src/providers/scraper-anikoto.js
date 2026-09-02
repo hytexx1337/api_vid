@@ -6,6 +6,8 @@
  * devolviendo listas separadas por audio (sub/dub) para integrarse con /anime/:anilistId/:episode.
  */
 
+import { ANILIST_HEADERS } from "../config/constants.js";
+
 const ANIKOTO = "https://anikototv.to";
 const MAPPER = "https://mapper.nekostream.site/api/mal";
 const SPOOF_REF = "https://hianimes.re/";
@@ -72,7 +74,7 @@ async function getAnilistMedia(anilistId) {
 
   const res = await fetch("https://graphql.anilist.co", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    headers: ANILIST_HEADERS,
     body: JSON.stringify({
       query: `query($id:Int){Media(id:$id){idMal title{english romaji} synonyms}}`,
       variables: { id: Number(anilistId) },

@@ -47,6 +47,17 @@ export const HEADERS = {
   Referer: "https://fmoviesunblocked.net/",
 };
 
+// AniList exige Origin/Referer de anilist.co o devuelve 403 "The AniList API
+// has been temporarily disabled due to severe stability issues" — es un check
+// de headers, no un bloqueo por IP (verificado con scripts/test-anilist.mjs).
+export const ANILIST_HEADERS = {
+  "Content-Type": "application/json",
+  Accept: "application/json",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+  Origin: "https://anilist.co",
+  Referer: "https://anilist.co/",
+};
+
 export const TMDB_BEARER = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIyMjYwNmNlMmU2MTJkOGQyYzQyNzhmYWNhNDE5Y2VjMSIsIm5iZiI6MTc1ODk0Njk4NC4yOTcsInN1YiI6IjY4ZDc2NmE4NWFmYjU3ZjJjZTUyZmMzZCIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.-KoF5Nloah5nLAlONDasUwMb9OUS_LbawNd8mdRGNBg";
 
 export const STREAM_TTL = 7 * 24 * 60 * 60 * 1000; // 7 días (persistido en disco, ver lib/cache.js)

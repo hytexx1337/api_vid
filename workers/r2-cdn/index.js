@@ -25,6 +25,16 @@
 // inmediatamente después de pedir el playlist.
 const SEGMENT_TTL_SECONDS = 21600; // 6h
 
+// TTL del cache de edge (Cache API) para segmentos/keys ya servidos. Los
+// objetos son inmutables una vez archivados (mismo key = mismos bytes para
+// siempre), así que podemos cachear agresivamente. Esto SOLO evita el
+// R2.get() repetido — la validación de la firma (exp/sig) sigue siendo
+// obligatoria en cada request, el cache nunca la evita.
+//
+// Requiere que el Worker esté atado a un Custom Domain (no *.workers.dev):
+// caches.default no opera en el subdominio workers.dev por defecto.
+const EDGE_CACHE_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 días
+
 function toBase64Url(buf) {
   let binary = "";
   const bytes = new Uint8Array(buf);
@@ -134,23 +144,44 @@ export default {
 
     // Segmento o AES key: devolver bytes crudos con el Content-Type real
     // (no el camuflado con el que se subió a R2).
-    const rangeHeader = request.headers.get("range");
-    const object = await env.BUCKET.get(key, rangeHeader ? { range: request.headers } : undefined);
-    if (!object) return new Response("Not found", { status: 404 });
+    //
+    // Cache key normalizada: mismo path, SIN el query string (exp/sig son
+    // solo para autenticar el request actual, no deben fragmentar el cache
+    // — dos URLs firmadas distintas para el mismo objeto deben pegarle a
+    // la misma entrada de cache). La firma ya se validó arriba para
+    // llegar hasta acá, así que el cache nunca sirve nada sin auth previa.
+    const cache = caches.default;
+    const cacheUrl = new URL(request.url);
+    cacheUrl.search = "";
+    const cacheKeyRequest = new Request(cacheUrl.toString(), {
+      method: "GET",
+      headers: request.headers, // preserva el Range para que Cloudflare sirva el 206 recortado
+    });
 
-    const filename = key.split("/").pop();
-    const headers = new Headers();
-    headers.set("content-type", contentTypeFor(filename));
-    headers.set("cache-control", "public, max-age=21600, immutable");
-    headers.set("access-control-allow-origin", "*");
-    if (object.range) {
-      headers.set("content-range", `bytes ${object.range.offset}-${object.range.offset + object.range.length - 1}/${object.size}`);
-      headers.set("content-length", String(object.range.length));
+    let response = await cache.match(cacheKeyRequest);
+    if (!response) {
+      // Miss: traer el objeto COMPLETO (sin range) para guardar una única
+      // copia en cache; Cloudflare resuelve los Range requests recortando
+      // esa copia automáticamente en los hits siguientes.
+      const object = await env.BUCKET.get(key);
+      if (!object) return new Response("Not found", { status: 404 });
+
+      const filename = key.split("/").pop();
+      const headers = new Headers();
+      headers.set("content-type", contentTypeFor(filename));
+      headers.set("cache-control", `public, max-age=${EDGE_CACHE_TTL_SECONDS}, immutable`);
+      headers.set("access-control-allow-origin", "*");
+      headers.set("accept-ranges", "bytes");
+      headers.set("content-length", String(object.size));
+
+      const fullResponse = new Response(object.body, { status: 200, headers });
+      await cache.put(cacheKeyRequest, fullResponse.clone());
+
+      // Volver a pedirla por match() para que, si el request original traía
+      // Range, se devuelva ya recortada (206) igual que en un hit real.
+      response = (await cache.match(cacheKeyRequest)) || fullResponse;
     }
 
-    return new Response(object.body, {
-      status: object.range ? 206 : 200,
-      headers,
-    });
+    return response;
   },
 };

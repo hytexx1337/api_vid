@@ -1,4 +1,5 @@
 import { createDecipheriv } from "crypto";
+import { ANILIST_HEADERS } from "../config/constants.js";
 
 const ANIMEAV1_BASE = "https://animeav1.com/media";
 
@@ -88,7 +89,7 @@ export async function getAnilistInfo(anilistId) {
   const q = `query($id:Int){Media(id:$id,type:ANIME){idMal title{romaji english} format}}`;
   const res = await fetch("https://graphql.anilist.co", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: ANILIST_HEADERS,
     body: JSON.stringify({ query: q, variables: { id: Number(anilistId) } }),
     signal: AbortSignal.timeout(5000),
   });
@@ -454,7 +455,7 @@ export async function getEpisodeOffset(anilistId) {
     const q = `query($id:Int){Media(id:$id,type:ANIME){idMal title{romaji english} relations{edges{relationType node{id idMal format episodes title{romaji english}}}}}}`;
     const alRes = await fetch("https://graphql.anilist.co", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: ANILIST_HEADERS,
       body: JSON.stringify({ query: q, variables: { id: Number(anilistId) } }),
       signal: AbortSignal.timeout(4000),
     });
