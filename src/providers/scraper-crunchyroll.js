@@ -12,6 +12,9 @@ import { createHash } from "crypto";
 import { removeSpamLines } from "../lib/subtitle-cleaner.js";
 import { getAnilistInfo, getEpisodeOffset } from "./scraper.js";
 import { anilistToImdb  } from "./scraper-cuevana.js";
+import { isR2Configured, uploadToR2 } from "../lib/hls-to-r2.js";
+
+const SUB_CONTENT_TYPE = { vtt: "text/vtt; charset=utf-8", ass: "text/x-ssa; charset=utf-8" };
 
 const __dir     = resolve(fileURLToPath(import.meta.url), "..");
 const SUBS_DIR  = join(__dir, "..", "..", "subs-cache");
@@ -627,6 +630,42 @@ async function getCRMovieSubtitles(anilistId, titleRomaji, titleEnglish) {
     try { listing = await searchMovieListing(t); break; }
     catch (e) { lastErr = e; }
   }
+
+  // Fallback: algunas entradas MOVIE de AniList están en CR como episodios
+  // especiales dentro de la serie (ej. las películas de Bunny Girl Senpai
+  // son E1 de una season propia, no un movie_listing). Buscar la serie y
+  // tomar la season cuyo título más se parezca al de la película.
+  if (!listing) {
+    for (const t of titlesToTry) {
+      let series = null;
+      try { series = await searchSeries(t); } catch { continue; }
+      const seasons = await getSeasons(series.id).catch(() => []);
+      if (!seasons.length) continue;
+
+      let bestSeason = null, bestScore = 0;
+      for (const s of seasons) {
+        const sc = Math.max(...titlesToTry.map(tt => titleSimilarity(tt, s.title ?? "")));
+        if (sc > bestScore) { bestScore = sc; bestSeason = s; }
+      }
+      // Si ninguna season se parece al título, probar la última (las
+      // películas/especiales suelen quedar al final de la lista).
+      const season = bestScore >= 0.3 ? bestSeason : seasons[seasons.length - 1];
+      const eps = await getEpisodes(season.id).catch(() => []);
+      if (!eps.length) continue;
+
+      let ep = eps[0];
+      if (eps.length > 1) {
+        let bs = 0;
+        for (const e of eps) {
+          const sc = Math.max(...titlesToTry.map(tt => titleSimilarity(tt, e.title ?? "")));
+          if (sc > bs) { bs = sc; ep = e; }
+        }
+      }
+      listing = { ...ep, type: "episode" };
+      console.log(`[crunchyroll] película-como-episodio: serie="${series.title}" season="${season.title}" ep="${ep.title}" (id=${ep.id})`);
+      break;
+    }
+  }
   if (!listing) throw lastErr ?? new Error("CR: película no encontrada");
 
   // Si el resultado es un movie_listing, obtener sus películas. Si es series, obtener el primer episodio.
@@ -734,7 +773,9 @@ export async function getCRSubsForAnime(anilistId, episode) {
   // 2. Índice en disco — si el archivo sigue existiendo, no tocamos CR
   const persisted = crIndex[idxKey];
   if (persisted?.length) {
-    const missingFiles = persisted.filter(t => !existsSync(join(SUBS_DIR, t.file)));
+    // Tracks subidos a R2 (t.r2) no viven en disco local — no hay nada que
+    // verificar ahí, el objeto en el bucket es inmutable.
+    const missingFiles = persisted.filter(t => !t.r2 && !existsSync(join(SUBS_DIR, t.file)));
     if (!missingFiles.length) {
       console.log(`[crunchyroll] ✅ subs desde disco para ${idxKey}`);
       cacheSet(memKey, persisted, 24 * 60 * 60 * 1000);
@@ -780,11 +821,28 @@ export async function getCRSubsForAnime(anilistId, episode) {
 
   console.log(`[crunchyroll] descargando ${vttTracks.length} VTT + ${assTracks.length} ASS (${assTracks.map(t => t.lang).join(", ") || "ninguno"})`);
 
-  // 4. Descargar VTT (todos) y ASS (solo idiomas deseados) al disco inmediatamente
+  // 4. Descargar VTT (todos) y ASS (solo idiomas deseados). Si R2 está
+  // configurado, subir directo ahí (evita servir desde el VPS, que a veces
+  // responde lento/timeout); si no, caer al disco local como siempre.
+  const r2Ready = isR2Configured();
   const localTracks = await Promise.all(tracksToDownload.map(async t => {
     const hash     = createHash("sha1").update(t.url).digest("hex");
     const filename = `cr_${hash}.${t.format}`;
     const filepath = join(SUBS_DIR, filename);
+
+    if (r2Ready) {
+      try {
+        const r = await fetch(t.url, { signal: AbortSignal.timeout(10000) });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const text = removeSpamLines(await r.text());
+        await uploadToR2(`subs/${filename}`, Buffer.from(text, "utf-8"), SUB_CONTENT_TYPE[t.format]);
+        return { label: t.label, lang: t.lang, format: t.format, file: filename, r2: true };
+      } catch (e) {
+        console.warn(`[crunchyroll] fallo subida a R2 ${t.format.toUpperCase()} (${t.lang}), cae a disco local: ${e.message}`);
+        // sigue al fallback de disco abajo
+      }
+    }
+
     if (!existsSync(filepath)) {
       try {
         const r = await fetch(t.url, { signal: AbortSignal.timeout(10000) });

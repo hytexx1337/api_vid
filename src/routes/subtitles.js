@@ -4,6 +4,7 @@ import { cacheGet, cacheSet } from "../lib/cache.js";
 import { getProxyBase } from "../lib/proxy.js";
 import { buildTracks, getVidrkSubsWithIndex } from "../lib/subtitles.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
+import { buildSignedR2Url } from "../lib/r2-seal.js";
 
 const router = Router();
 
@@ -30,14 +31,18 @@ async function resolveAnimeSubs(anilistId, episode, proxyBase) {
   if (cached) return cached;
 
   const crTracks = await getCRSubsForAnime(anilistId, parseInt(episode)).catch(() => []);
+  // Los tracks de CR ya vienen descargados/archivados por getCRSubsForAnime
+  // (a R2 o a disco local, ver scraper-crunchyroll.js) — no hace falta
+  // pasarlos por buildTracks/downloadSubtitles (ese pipeline es para
+  // providers que dan URLs externas crudas sin cachear).
   const tracks = crTracks?.length
-    ? await buildTracks(crTracks.map(t => ({
+    ? crTracks.map(t => ({
         label: t.label,
         lang: t.lang,
-        url: t.format === "ass" ? `${proxyBase}/subs/${t.file}` : t.file,
+        url: t.r2 ? buildSignedR2Url(`subs/${t.file}`) : `${proxyBase}/subs/${t.file}`,
         kind: t.format === "vtt" ? "captions" : "subtitles",
         ...(t.default && { default: true }),
-      })), proxyBase)
+      }))
     : [];
 
   const result = { subtitles: tracks };

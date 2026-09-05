@@ -106,10 +106,14 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   ]);
   const ASS_LABELS = { "en-US": "English", "es-419": "Español latino", "es-ES": "Español" };
 
+  // Tracks de CR ya vienen descargados/archivados por getCRSubsForAnime (a
+  // R2 o a disco local) — resolver la url final directo, sin pasar por
+  // buildTracks/downloadSubtitles (ese pipeline re-descargaría cualquier
+  // url con .file ausente, pisando la url de R2 con una copia local).
   const vttTracks = (crTracks || []).filter(t => t.format === "vtt").map(t => ({
     label: t.lang === "en-US" ? "English CC" : normalizeSubLabel(t.label, t.lang),
     lang: t.lang,
-    file: t.file,
+    url: t.r2 ? buildSignedR2Url(`subs/${t.file}`) : `${proxyBase}/subs/${t.file}`,
     kind: "captions",
     ...(t.default && { default: true }),
   }));
@@ -117,7 +121,7 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   const assTracks = (crTracks || []).filter(t => t.format === "ass" && WANTED_ASS_LANGS.has(t.lang)).map(t => ({
     label: ASS_LABELS[t.lang] || t.label || t.lang,
     lang: t.lang,
-    file: t.file,
+    url: t.r2 ? buildSignedR2Url(`subs/${t.file}`) : `${proxyBase}/subs/${t.file}`,
     kind: "subtitles",
     ...(t.default && { default: true }),
   }));
@@ -133,9 +137,11 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
       megaplayTracks.push({ label: s.label, lang: s.lang, url: s.url, kind: "subtitles", referer: s.referer, ...(s.default && { default: s.default }) });
     }
   }
-  const rawTracks = [...vttTracks, ...assTracks, ...megaplayTracks];
-  if (!rawTracks.length) return [];
-  return buildTracks(rawTracks, proxyBase);
+  // Solo los tracks de megaplay (urls externas crudas) necesitan el
+  // pipeline genérico de descarga/cacheo local.
+  const processedMegaplay = megaplayTracks.length ? await buildTracks(megaplayTracks, proxyBase) : [];
+  const rawTracks = [...vttTracks, ...assTracks, ...processedMegaplay];
+  return rawTracks;
 }
 
 // ── Movie endpoint ────────────────────────────────────────────────────────────

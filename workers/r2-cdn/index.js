@@ -79,6 +79,11 @@ function contentTypeFor(filename) {
   if (filename.startsWith("init-")) return "video/mp4";
   if (filename.startsWith("fseg-")) return "video/mp4";
   if (filename.startsWith("key-")) return "application/octet-stream";
+  // Subtítulos (ver src/providers/scraper-crunchyroll.js) subidos sin
+  // disguise bajo el prefijo subs/ — se distinguen por extensión.
+  if (filename.endsWith(".vtt")) return "text/vtt; charset=utf-8";
+  if (filename.endsWith(".ass")) return "text/x-ssa; charset=utf-8";
+  if (filename.endsWith(".srt")) return "application/x-subrip; charset=utf-8";
   return "application/octet-stream";
 }
 

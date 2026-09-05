@@ -32,6 +32,17 @@ export function assertR2Env() {
   }
 }
 
+// Chequeo no-throw para callers que quieren R2 como mejora opcional (ej.
+// subtítulos: si no está configurado, caen al disco local sin romper nada).
+// Incluye R2_SEAL_SECRET/R2_WORKER_BASE porque sin eso no se puede generar
+// la URL firmada para servir el objeto después de subirlo.
+export function isR2Configured() {
+  return !!(
+    R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME &&
+    process.env.R2_SEAL_SECRET && process.env.R2_WORKER_BASE
+  );
+}
+
 const s3 = new S3Client({
   region: "auto",
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -62,6 +73,10 @@ async function fetchBuffer(url, attempt = 1) {
     }
     throw e;
   }
+}
+
+export async function uploadToR2(key, buf, contentType, attempt = 1) {
+  return upload(key, buf, contentType, attempt);
 }
 
 async function upload(key, buf, contentType, attempt = 1) {
