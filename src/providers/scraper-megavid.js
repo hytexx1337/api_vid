@@ -11,7 +11,11 @@
  * o a través de nuestro proxy genérico.
  */
 
-const BASE = "https://megavid.buzz";
+// Si MEGAVID_WORKER está set, las requests salen por el worker de CF
+// (workers/megavid-proxy) porque el VPS tiene conectividad rota con
+// megavid.buzz (timeouts frecuentes). El worker expone las mismas rutas
+// /ani/... así que funciona como BASE drop-in.
+const BASE = (process.env.MEGAVID_WORKER || "https://megavid.buzz").replace(/\/$/, "");
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 
 const CACHE_TTL = 6 * 60 * 60 * 1000; // 6 horas

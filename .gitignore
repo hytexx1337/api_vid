@@ -14,3 +14,4 @@ yarn-error.log*
 altcha.min.js
 voe-debug*.html
 scripts/_tmp-*
+*.env

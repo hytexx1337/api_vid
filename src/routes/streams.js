@@ -335,15 +335,21 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     streams.push(s);
   }
 
-  // Megavid DUB — endpoint directo, la playlist no exige Referer ni proxy:
-  // proxy_url apunta directo al m3u8 origen (sealProxyUrls lo deja intacto
-  // porque no es un path de proxy interno). Sirve igual como candidato de
-  // archivado R2, que usa proxy_url como URL de descarga.
-  if (megavid?.url) {
-    const s = makeAnimeStream(proxyBase, megavid.url, "auto", "en-dub", "megavid");
-    s.proxy_url = megavid.url;
-    streams.push(s);
-  }
+  // Megavid DUB — el CDN (cp.megavid.buzz) bloquea referers ajenos
+    // (player.zenkai.live da 403). Si hay worker de CF (MEGAVID_WORKER) el
+    // stream sale por ahí directo — el VPS tiene conectividad rota con
+    // megavid, así que ni la API ni el CDN le responden bien; si no, cae
+    // al proxy genérico con Referer megavid.buzz.
+    if (megavid?.url) {
+      const s = makeAnimeStream(proxyBase, megavid.url, "auto", "en-dub", "megavid", {
+        headers: { Referer: "https://megavid.buzz/", "User-Agent": HEADERS["User-Agent"] },
+      });
+      const worker = (process.env.MEGAVID_WORKER || "").replace(/\/$/, "");
+      s.proxy_url = worker
+        ? worker + new URL(megavid.url).pathname + new URL(megavid.url).search
+        : `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(megavid.url)}&ref=${encodeURIComponent("https://megavid.buzz/")}`;
+      streams.push(s);
+    }
 
   // animeav1 — links de descarga directa (Mega, 1Fichier, MP4Upload, StreamTape)
   const downloads = [];
