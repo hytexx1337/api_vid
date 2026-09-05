@@ -29,8 +29,21 @@ try {
   if (existsSync(CR_INDEX)) crIndex = JSON.parse(readFileSync(CR_INDEX, "utf-8"));
 } catch {}
 
-function saveCRIndex() {
-  try { writeFileSync(CR_INDEX, JSON.stringify(crIndex, null, 2)); } catch {}
+// Merge con el archivo en disco (no un dump del crIndex completo en memoria):
+// si otro proceso/script (ej. scripts/r2-migrate-cr-subs.js) tocó otras keys
+// mientras este proceso estaba vivo, un dump ciego del snapshot en memoria
+// las pisaría de vuelta al estado viejo. Solo actualizamos la key que nos
+// importa y sincronizamos el in-memory con lo que quedó en disco.
+function saveCRIndex(key, value) {
+  try {
+    let onDisk = {};
+    if (existsSync(CR_INDEX)) {
+      try { onDisk = JSON.parse(readFileSync(CR_INDEX, "utf-8")); } catch {}
+    }
+    onDisk[key] = value;
+    crIndex = onDisk;
+    writeFileSync(CR_INDEX, JSON.stringify(onDisk, null, 2));
+  } catch {}
 }
 const BASE      = "https://beta-api.crunchyroll.com";
 const CR_WWW    = "https://www.crunchyroll.com";
@@ -859,8 +872,7 @@ export async function getCRSubsForAnime(anilistId, episode) {
 
   // 5. Persistir en índice
   if (validTracks.length) {
-    crIndex[idxKey] = validTracks;
-    saveCRIndex();
+    saveCRIndex(idxKey, validTracks);
   }
 
   cacheSet(memKey, validTracks, 24 * 60 * 60 * 1000);

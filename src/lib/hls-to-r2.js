@@ -17,7 +17,7 @@
  *   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET_NAME
  */
 
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 
 const {
   R2_ACCOUNT_ID,
@@ -77,6 +77,15 @@ async function fetchBuffer(url, attempt = 1) {
 
 export async function uploadToR2(key, buf, contentType, attempt = 1) {
   return upload(key, buf, contentType, attempt);
+}
+
+export async function objectExistsInR2(key) {
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function upload(key, buf, contentType, attempt = 1) {
