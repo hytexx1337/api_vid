@@ -70,6 +70,14 @@ async function verifySig(secret, path, exp, sig) {
 
 function contentTypeFor(filename) {
   if (filename.startsWith("seg-")) return "video/mp2t";
+  // Init segment y segmentos de media fMP4/CMAF (EXT-X-MAP presente en el
+  // playlist original): son boxes MP4 reales. Receivers estrictos
+  // (Chromecast/Shaka) usan este header para elegir el mimeType del
+  // SourceBuffer al inicializar el demuxer — si se sirven como
+  // application/octet-stream, se rechazan y el cast falla (en navegador con
+  // hls.js no se nota porque hls.js ignora el Content-Type).
+  if (filename.startsWith("init-")) return "video/mp4";
+  if (filename.startsWith("fseg-")) return "video/mp4";
   if (filename.startsWith("key-")) return "application/octet-stream";
   return "application/octet-stream";
 }

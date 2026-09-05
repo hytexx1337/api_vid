@@ -9,6 +9,7 @@ export {
 } from "./scraper-cuevana.js";
 export { getAnikotoStreams } from "./scraper-anikoto.js";
 export { getMegaplayStreams } from "./scraper-megaplay.js";
+export { getMegavidStream } from "./scraper-megavid.js";
 export { getCRSubsForAnime, WANTED_ASS_LANGS } from "./scraper-crunchyroll.js";
 export { getMiruroStreams } from "./miruro.js";
 export {

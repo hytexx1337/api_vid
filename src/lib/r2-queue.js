@@ -40,15 +40,24 @@ export function isQueuedOrArchiving(animeId, episode, lang) {
 /**
  * Encola un job de archivado. Devuelve false si ya estaba en cola/procesándose
  * (no duplica), true si se encoló.
+ *
+ * `candidates` es una lista ordenada de { streamUrl, sourceProvider }: si el
+ * archivado falla con el primero, se reintenta con el siguiente (fallback
+ * entre providers, ej. megaplay caído -> anikoto -> megavid).
+ * También acepta la forma vieja { streamUrl, sourceProvider } por compat.
  */
-export function enqueueArchiveJob({ animeId, episode, lang, streamUrl, sourceProvider }) {
+export function enqueueArchiveJob({ animeId, episode, lang, streamUrl, sourceProvider, candidates }) {
   const k = jobKey(animeId, episode, lang);
   if (inFlight.has(k)) return false;
-  if (!streamUrl) return false;
+
+  const list = candidates?.length
+    ? candidates
+    : (streamUrl ? [{ streamUrl, sourceProvider }] : []);
+  if (!list.length) return false;
 
   inFlight.add(k);
-  queue.push({ animeId, episode, lang, streamUrl, sourceProvider, k });
-  console.log(`[r2-queue] encolado ${k} (cola: ${queue.length}, activos: ${active})`);
+  queue.push({ animeId, episode, lang, candidates: list, k });
+  console.log(`[r2-queue] encolado ${k} (cola: ${queue.length}, activos: ${active}, candidatos: ${list.length})`);
   processNext();
   return true;
 }
@@ -64,17 +73,21 @@ function processNext() {
   });
 }
 
-async function runJob({ animeId, episode, lang, streamUrl, sourceProvider, k }) {
+async function runJob({ animeId, episode, lang, candidates, k }) {
   const slug = `${animeId}-${episode}-${lang.toLowerCase()}`;
   const t0 = Date.now();
-  try {
-    console.log(`[r2-queue] archivando ${k} -> ${slug} ...`);
-    const { bytes } = await archiveHlsToR2(streamUrl, slug);
-    upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes });
-    console.log(`[r2-queue] listo ${k} en ${((Date.now() - t0) / 1000).toFixed(1)}s, ${(bytes / 1024 / 1024).toFixed(1)} MB`);
-  } catch (e) {
-    console.warn(`[r2-queue] ERROR archivando ${k}: ${e.message}`);
+  for (const { streamUrl, sourceProvider } of candidates) {
+    try {
+      console.log(`[r2-queue] archivando ${k} -> ${slug} desde ${sourceProvider} ...`);
+      const { bytes } = await archiveHlsToR2(streamUrl, slug);
+      upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes });
+      console.log(`[r2-queue] listo ${k} en ${((Date.now() - t0) / 1000).toFixed(1)}s, ${(bytes / 1024 / 1024).toFixed(1)} MB (${sourceProvider})`);
+      return;
+    } catch (e) {
+      console.warn(`[r2-queue] ERROR archivando ${k} desde ${sourceProvider}: ${e.message}`);
+    }
   }
+  console.warn(`[r2-queue] ${k}: fallaron todos los candidatos (${candidates.length})`);
 }
 
 export function getQueueStatus() {

@@ -9,3 +9,8 @@ __pycache__/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Debug / scripts temporales
+altcha.min.js
+voe-debug*.html
+scripts/_tmp-*

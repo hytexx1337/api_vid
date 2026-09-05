@@ -26,6 +26,7 @@ import {
   getCuevanaStreams,
   getCuevanaMovieStreams,
   getMegaplayStreams,
+  getMegavidStream,
   getCRSubsForAnime,
   getMiruroStreams,
   getAnikotoStreams,
@@ -51,16 +52,26 @@ function handleError(res, err) {
 // Mismo criterio de prioridad de provider por idioma que scripts/r2-select.js.
 const R2_AUTO_ARCHIVE_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
-  "ENG-DUB": ["megaplay", "miruro", "anikoto"],
+  "ENG-DUB": ["megaplay", "anikoto", "megavid", "miruro"],
 };
 
-function pickArchiveCandidate(streams, lang, priorityList) {
+// Devuelve TODOS los candidatos ordenados por prioridad de provider, para que
+// el job de archivado pueda caer al siguiente si el primero falla (ej. la URL
+// de megaplay existe pero está muerta al momento de descargar).
+function pickArchiveCandidates(streams, lang, priorityList) {
   const candidates = streams.filter((s) => s.lang === lang && s.originalProvider !== "zenkai" && s.proxy_url);
+  const ordered = [];
   for (const prefix of priorityList) {
-    const match = candidates.find((s) => String(s.originalProvider || "").toLowerCase().includes(prefix));
-    if (match) return match;
+    for (const s of candidates) {
+      if (String(s.originalProvider || "").toLowerCase().includes(prefix) && !ordered.includes(s)) {
+        ordered.push(s);
+      }
+    }
   }
-  return candidates[0] ?? null;
+  for (const s of candidates) {
+    if (!ordered.includes(s)) ordered.push(s);
+  }
+  return ordered;
 }
 
 // Encola a R2 los idiomas que todavía no están archivados. proxy_url apunta
@@ -71,12 +82,15 @@ function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyB
   for (const [lang, priorityList] of Object.entries(R2_AUTO_ARCHIVE_PRIORITY)) {
     if (r2Archived[lang]) continue;
     if (isQueuedOrArchiving(anilistId, episode, lang)) continue;
-    const candidate = pickArchiveCandidate(streams, lang, priorityList);
-    if (!candidate) continue;
-    const streamUrl = candidate.proxy_url.startsWith(proxyBase)
-      ? internalBase + candidate.proxy_url.slice(proxyBase.length)
-      : candidate.proxy_url;
-    enqueueArchiveJob({ animeId: anilistId, episode, lang, streamUrl, sourceProvider: candidate.originalProvider });
+    const candidates = pickArchiveCandidates(streams, lang, priorityList);
+    if (!candidates.length) continue;
+    const jobCandidates = candidates.map((c) => ({
+      streamUrl: c.proxy_url.startsWith(proxyBase)
+        ? internalBase + c.proxy_url.slice(proxyBase.length)
+        : c.proxy_url,
+      sourceProvider: c.originalProvider,
+    }));
+    enqueueArchiveJob({ animeId: anilistId, episode, lang, candidates: jobCandidates });
   }
 }
 
@@ -229,9 +243,10 @@ async function resolveAnimeData(anilistId, episode) {
     );
   };
 
-  const [latinoResult, megaplayResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult] = await Promise.allSettled([
+  const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult] = await Promise.allSettled([
     timed2("animeav1", getLatinoStream(anilistId, episode)),
     timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode))),
+    timed2("megavid", getMegavidStream(anilistId, parseInt(episode))),
     timed2("cuevana", getCuevanaAnime(anilistId, parseInt(episode))),
     timed2("cr-subs", getCRSubsForAnime(anilistId, parseInt(episode))),
     timed2("miruro", getMiruroStreams(anilistId, parseInt(episode))),
@@ -256,26 +271,28 @@ async function resolveAnimeData(anilistId, episode) {
   if (miruroResult.status === "rejected") console.warn("[anime] miruro ✗:", miruroResult.reason?.message);
   const anikoto = anikotoResult.status === "fulfilled" ? anikotoResult.value : { sub: [], dub: [] };
   if (anikotoResult.status === "rejected") console.warn("[anime] anikoto ✗:", anikotoResult.reason?.message);
+  const megavid = megavidResult.status === "fulfilled" ? megavidResult.value : null;
+  if (megavidResult.status === "rejected") console.warn("[anime] megavid ✗:", megavidResult.reason?.message);
 
-  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip };
+  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip };
 }
 
 router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
 
-  // v2: agrega extracción de `downloads` (animeav1 + miruro/kiwi/ally) — bump
-  // para invalidar entradas persistidas de antes de este cambio.
-  const cacheKey = `streams:anime:v2:${anilistId}:${episode}`;
+  // v3: agrega provider megavid (ENG-DUB) — bump para invalidar entradas
+  // persistidas de antes de este cambio.
+  const cacheKey = `streams:anime:v3:${anilistId}:${episode}`;
   let data = cacheGet(cacheKey);
 
   if (!data) {
     data = await resolveAnimeData(anilistId, episode);
-    const hasAny = data.megaplayDub || data.megaplaySub || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length;
+    const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length;
     if (hasAny) cacheSet(cacheKey, data, STREAM_TTL);
   }
 
-  const { megaplayDub, megaplaySub, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip } = data;
+  const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip } = data;
   const tracks = await buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub);
 
   const streams = [];
@@ -315,6 +332,16 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   if (megaplaySub) {
     const s = makeAnimeStream(proxyBase, megaplaySub.url, "auto", "japanese", "megaplay", { skip: Object.keys(megaplaySub.skip).length ? megaplaySub.skip : null });
     s.proxy_url = `${proxyBase}/proxy?url=${encodeURIComponent(megaplaySub.url)}&headers=${encodeURIComponent(JSON.stringify(megaplaySub.headers || {}))}`;
+    streams.push(s);
+  }
+
+  // Megavid DUB — endpoint directo, la playlist no exige Referer ni proxy:
+  // proxy_url apunta directo al m3u8 origen (sealProxyUrls lo deja intacto
+  // porque no es un path de proxy interno). Sirve igual como candidato de
+  // archivado R2, que usa proxy_url como URL de descarga.
+  if (megavid?.url) {
+    const s = makeAnimeStream(proxyBase, megavid.url, "auto", "en-dub", "megavid");
+    s.proxy_url = megavid.url;
     streams.push(s);
   }
 
@@ -377,15 +404,17 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   // cuevana
   for (const c of (cuevanaStreams ?? [])) streams.push(makeCuevanaStream(c, proxyBase));
 
-  // Anikoto
-  for (const [list, lang] of [
-    [anikoto?.dub ?? [], "en-dub"],
-    [anikoto?.sub ?? [], "japanese"],
+  // Anikoto (hsub = japonés con subs en inglés quemados; normalizeLang lo
+  // mapea a JAP-EN-HS porque el provider contiene "anikoto")
+  for (const [list, lang, prefix] of [
+    [anikoto?.dub ?? [], "en-dub", "anikoto"],
+    [anikoto?.sub ?? [], "japanese", "anikoto"],
+    [anikoto?.hsub ?? [], "japanese", "anikoto-hsub"],
   ]) {
     for (const src of list) {
       const isHLS = src.type === "hls" || src.url.includes(".m3u8");
       if (!isHLS) continue;
-      const originalProvider = `anikoto-${src.server}`;
+      const originalProvider = `${prefix}-${src.server}`;
       const s = makeAnimeStream(proxyBase, src.url, "auto", lang, originalProvider, {
         headers: { Referer: src.referer, Origin: src.referer.replace(/\/$/, ""), "User-Agent": HEADERS["User-Agent"] },
         skip: src.skip ?? null,

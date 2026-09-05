@@ -129,12 +129,36 @@ async function processPlaylist(url, dirPrefix, counters) {
     return processPlaylist(abs, dirPrefix, counters);
   }
 
-  // Media playlist (ya sin variantes): procesar keys y segmentos
+  // Media playlist (ya sin variantes): procesar keys, init segments (MAP) y segmentos.
+  // IMPORTANTE: EXT-X-KEY (clave AES real) y EXT-X-MAP (init segment fMP4/CMAF,
+  // literalmente un box MP4) se archivan con prefijos DISTINTOS ("key-" / "init-")
+  // aunque ambos usen la extensión camuflada .jpg. El Worker r2-cdn necesita
+  // distinguirlos para servir Content-Type correcto (video/mp4 para el init
+  // segment) — si no, Chromecast/Shaka rechaza el init MP4 servido como
+  // application/octet-stream y el cast falla (en navegador con hls.js no se
+  // nota porque hls.js ignora el Content-Type).
+  // Si el playlist trae EXT-X-MAP, los segmentos de media son fMP4/CMAF
+  // (fragmentos MP4 que referencian el init segment), no MPEG-TS. Hay que
+  // archivarlos con un prefijo distinto ("fseg-") para que el Worker los
+  // sirva como video/mp4 en vez de video/mp2t.
+  const isFmp4 = lines.some((l) => /^#EXT-X-MAP/i.test(l.trim()));
+
   const out = [];
   for (const rawLine of lines) {
     const trimmed = rawLine.trim();
 
-    if (/^#EXT-X-(KEY|MAP)/i.test(trimmed) && /URI="([^"]+)"/.test(trimmed)) {
+    if (/^#EXT-X-MAP/i.test(trimmed) && /URI="([^"]+)"/.test(trimmed)) {
+      const uri = trimmed.match(/URI="([^"]+)"/)[1];
+      const abs = resolveUrl(uri, url);
+      const { buf: initBuf } = await fetchBuffer(abs);
+      const filename = `init-${String(++counters.init).padStart(3, "0")}${DISGUISED_SEGMENT_EXT}`;
+      const { bytes } = await upload(`${dirPrefix}/${filename}`, initBuf, DISGUISED_CONTENT_TYPE);
+      counters.bytes += bytes;
+      out.push(rawLine.replace(/URI="([^"]+)"/, `URI="${filename}"`));
+      continue;
+    }
+
+    if (/^#EXT-X-KEY/i.test(trimmed) && /URI="([^"]+)"/.test(trimmed)) {
       const uri = trimmed.match(/URI="([^"]+)"/)[1];
       const abs = resolveUrl(uri, url);
       const { buf: keyBuf } = await fetchBuffer(abs);
@@ -149,7 +173,8 @@ async function processPlaylist(url, dirPrefix, counters) {
     if (!trimmed.startsWith("#") && trimmed) {
       const abs = resolveUrl(trimmed, url);
       const { buf: segBuf } = await fetchBuffer(abs);
-      const filename = `seg-${String(++counters.seg).padStart(5, "0")}${DISGUISED_SEGMENT_EXT}`;
+      const prefix = isFmp4 ? "fseg-" : "seg-";
+      const filename = `${prefix}${String(++counters.seg).padStart(5, "0")}${DISGUISED_SEGMENT_EXT}`;
       const { bytes } = await upload(`${dirPrefix}/${filename}`, segBuf, DISGUISED_CONTENT_TYPE);
       counters.bytes += bytes;
       out.push(filename);
@@ -170,7 +195,7 @@ async function processPlaylist(url, dirPrefix, counters) {
  */
 export async function archiveHlsToR2(inputUrl, slug) {
   assertR2Env();
-  const counters = { seg: 0, key: 0, bytes: 0 };
+  const counters = { seg: 0, key: 0, init: 0, bytes: 0 };
   const t0 = Date.now();
 
   const finalPlaylist = await processPlaylist(inputUrl, slug, counters);

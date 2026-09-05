@@ -12,7 +12,10 @@ export function normalizeLang(lang, originalProvider = "") {
   if (l === "japanese" || l === "jap" || l.startsWith("ja") || l.includes("jap")) {
     // Hardsub detection
     if (op.includes("animeav1")) return { lang: "JAP-ES-HS", langLabel: "Japonés (sub español quemado)" };
-    if (op.includes("miruro") || op.includes("anikoto")) return { lang: "JAP-EN-HS", langLabel: "Japonés (sub inglés quemado)" };
+    // hsub = hardsub real (sub quemado). anikoto da ambos: "anikoto-*" es
+    // soft-sub y "anikoto-hsub-*" es el quemado — hay que mirar "hsub" y no
+    // "anikoto" a secas para no etiquetar mal los soft-subs.
+    if (op.includes("miruro") || op.includes("hsub")) return { lang: "JAP-EN-HS", langLabel: "Japonés (sub inglés quemado)" };
     return { lang: "JAP-SUB", langLabel: "Japonés (sub por separado)" };
   }
 

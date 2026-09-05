@@ -202,7 +202,10 @@ async function extractEmbedSource(embedUrl) {
     if (!m?.[1]) return null;
     const fileId = m[1];
     const origin = new URL(embedUrl).origin;
-    const typeMatch = pageHtml.match(/type:\s*['"](sub|dub)['"]/);
+    // El embed declara el type que hay que pedirle a getSources (sub, dub,
+    // hsub, etc). Si lo limitamos a sub|dub, los embeds hsub piden sin type
+    // y el server devuelve el source de soft-sub por defecto.
+    const typeMatch = pageHtml.match(/type:\s*['"]([a-zA-Z]+)['"]/);
     const audioType = typeMatch?.[1];
     const typeQs = audioType ? `&type=${audioType}` : "";
     const data = await getJSON(`${origin}/stream/getSources?id=${fileId}&id=${fileId}${typeQs}`, {
@@ -280,6 +283,7 @@ async function fetchAudioStreams(media, show, epNum, audio) {
 
   const serverHtml = serverData?.result || "";
   const serverItems = [];
+  const hsubItems = [];
   const downloadItems = [];
 
   const typeRe = /<div class="type" data-type="([^"]+)">([\s\S]*?)<\/ul>\s*<\/div>/g;
@@ -295,6 +299,8 @@ async function fetchAudioStreams(media, show, epNum, audio) {
         downloadItems.push({ linkId, name });
       } else if (typeName === audio) {
         serverItems.push({ linkId, name });
+      } else if (audio === "sub" && typeName === "hsub") {
+        hsubItems.push({ linkId, name });
       }
     }
   }
@@ -315,9 +321,11 @@ async function fetchAudioStreams(media, show, epNum, audio) {
   }
 
   const streams = [];
-  const serverSeen = new Set();
 
-  for (const item of serverItems) {
+  const resolveItems = async (items, { allowHd1 = false } = {}) => {
+    const out = [];
+    const serverSeen = new Set();
+    for (const item of items) {
     if (serverSeen.has(item.name)) continue;
     serverSeen.add(item.name);
 
@@ -396,11 +404,16 @@ async function fetchAudioStreams(media, show, epNum, audio) {
         streamObj.skip = streamObj.skip || {};
         streamObj.skip.outro = [serverOutro.start, serverOutro.end];
       }
-      streams.push(streamObj);
+      out.push(streamObj);
     }
-  }
+    }
+    return out;
+  };
 
-  return { streams, malId: malIdNum };
+  for (const s of await resolveItems(serverItems, { allowHd1: true })) streams.push(s);
+  const hsubStreams = hsubItems.length ? await resolveItems(hsubItems) : [];
+
+  return { streams, hsubStreams, malId: malIdNum };
 }
 
 // ── API pública ─────────────────────────────────────────────────────────────────
@@ -428,18 +441,19 @@ export async function getAnikotoStreams(anilistId, episode) {
   const result = {
     sub: subResult.status === "fulfilled" ? subResult.value.streams : [],
     dub: dubResult.status === "fulfilled" ? dubResult.value.streams : [],
+    hsub: subResult.status === "fulfilled" ? (subResult.value.hsubStreams ?? []) : [],
   };
 
-  // Dedupe: si sub y dub resuelven al mismo HLS, evitar mostrar el mismo stream dos veces.
+  // Dedupe: si sub/dub/hsub resuelven al mismo HLS, evitar mostrar el mismo stream dos veces.
   const seenUrls = new Set();
-  for (const list of [result.sub, result.dub]) {
+  for (const list of [result.sub, result.dub, result.hsub]) {
     for (let i = list.length - 1; i >= 0; i--) {
       if (seenUrls.has(list[i].url)) list.splice(i, 1);
       else seenUrls.add(list[i].url);
     }
   }
 
-  if (result.sub.length || result.dub.length) {
+  if (result.sub.length || result.dub.length || result.hsub.length) {
     cache.set(key, { data: result, expiresAt: Date.now() + CACHE_TTL });
   }
   return result;
