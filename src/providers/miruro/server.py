@@ -37,18 +37,30 @@ EXCLUDED_PROVIDERS = {"moo", "bonk"}
 _proxy_host_cache = {"value": None, "fetched_at": 0}
 
 
-def get_proxy_host():
-    if _proxy_host_cache["value"] and time.time() - _proxy_host_cache["fetched_at"] < 3600:
-        return _proxy_host_cache["value"]
-
+def _fetch_env():
     res = requests.get("https://www.miruro.tv/env2.js", headers=HEADERS, impersonate="chrome110", timeout=10)
     raw = res.text.split('JSON.parse("', 1)[1].rsplit('")', 1)[0]
     env = json.loads(raw.encode().decode("unicode_escape"))
-
-    host = env["VITE_PROXY_B"]
-    _proxy_host_cache["value"] = host
+    _proxy_host_cache["value"] = env["VITE_PROXY_B"]
+    _proxy_host_cache["referer_origin"] = env["VITE_REFERER_ORIGIN"]
     _proxy_host_cache["fetched_at"] = time.time()
-    return host
+
+
+def get_proxy_host():
+    if not _proxy_host_cache["value"] or time.time() - _proxy_host_cache["fetched_at"] >= 3600:
+        _fetch_env()
+    return _proxy_host_cache["value"]
+
+
+# Origin/Referer fijo (VITE_REFERER_ORIGIN, ej. "https://strm.cx") que espera
+# el proxy de Miruro (s1.piltover.li/s1.watami.win) en el request que le
+# llega a ÉL — no confundir con el `referer` por-provider que se embebe
+# encriptado en la URL (ese es el que Miruro usa internamente para pedirle al
+# host de video real, y sí varía por provider).
+def get_referer_origin():
+    if not _proxy_host_cache.get("referer_origin") or time.time() - _proxy_host_cache["fetched_at"] >= 3600:
+        _fetch_env()
+    return _proxy_host_cache["referer_origin"]
 
 
 def pipe(path, query, timeout=15):
@@ -133,10 +145,14 @@ def pick_stream(source):
     ]
 
     referer = stream.get("referer")
+    referer_origin = get_referer_origin()
     return {
         "url": stream["url"],
         "proxyUrl": build_proxy_url(stream["url"], referer),
-        "headers": {"Referer": referer, "Origin": referer.rstrip("/")} if referer else {},
+        # OJO: el header que va acá es para pegarle al proxy de Miruro
+        # (piltover.li/watami.win) mismo, no al host de video real — por eso
+        # usa el origin fijo (VITE_REFERER_ORIGIN) y no el `referer` de arriba.
+        "headers": {"Referer": f"{referer_origin}/", "Origin": referer_origin} if referer_origin else {},
         "subtitles": subs,
         "download": source.get("download"),
     }
