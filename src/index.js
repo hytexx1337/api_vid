@@ -56,7 +56,7 @@ app.use((req, res, next) => {
 });
 
 // ── Auth middleware ──────────────────────────────────────────────────────────
-const PROXY_PATH = /^\/(sealed|proxy|ts-proxy|fetch|mp4-proxy|ghost-proxy|upn-stream\.m3u8|upn-seg|generic-stream\.m3u8|generic-media\.m3u8|generic-seg|vixsrc-stream\.m3u8|vixsrc-seg\.m3u8|vixsrc-seg|dash-proxy\.mpd|dash-seg|aes-key|subs|admin)(\/|$|\?)/;
+const PROXY_PATH = /^\/(sealed|proxy|ts-proxy|fetch|mp4-proxy|ghost-proxy|upn-stream\.m3u8|upn-seg|generic-stream\.m3u8|generic-media\.m3u8|generic-seg|vixsrc-stream\.m3u8|vixsrc-seg\.m3u8|vixsrc-seg|dash-proxy\.mpd|dash-seg|aes-key|subs|admin|flixcloud-m3u8|flixcloud-seg)(\/|$|\?)/;
 if (API_KEY) {
   app.use((req, res, next) => {
     if (req.path === "/health") return next();

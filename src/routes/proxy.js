@@ -13,6 +13,7 @@ import { SUBS_DIR } from "../lib/subtitles.js";
 import { removeSpamLines } from "../lib/subtitle-cleaner.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
 import { invalidateStreamsContainingUrl } from "../lib/cache.js";
+import { fetchAndDecryptFlixcloudManifest, decryptFlixcloudSegment } from "../lib/flixcloud-decrypt.js";
 
 const router = Router();
 
@@ -96,6 +97,96 @@ router.get("/upn-seg", async (req, res) => {
     setCacheForResponse(res, "video/mp2t", ".ts");
     upstream.body.pipeTo(new WritableStream({ write(chunk) { res.write(chunk); }, close() { res.end(); }, abort() { res.end(); } }));
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── FlixCloud manifest proxy ─────────────────────────────────────────────────
+// flixcloud.cc (usado por reanime.to) sirve sus .m3u8 (master/video/audio)
+// con un doble cifrado: Content-Encoding: zstd a nivel transporte + el body
+// destapado es texto base64 que decodeado es el m3u8 real XOReado con una
+// clave fija global de 32 bytes (reverseada el 2026-09-06, ver
+// lib/flixcloud-decrypt.js). Los segmentos (.webp/.png) tienen SU PROPIO
+// cifrado (header falso + XOR de 16 bytes, ver decryptFlixcloudSegment) y
+// pasan por /flixcloud-seg, no por el /ts-proxy genérico.
+const FLIXCLOUD_REFERER = "https://flixcloud.cc/";
+
+function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang) {
+  const rewriteAbsolute = (absolute) => {
+    if (absolute.includes(".m3u8")) {
+      const audioParam = onlyAudioLang ? `&audio=${encodeURIComponent(onlyAudioLang)}` : "";
+      return `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(absolute)}${audioParam}`;
+    }
+    return `${proxyBase}/flixcloud-seg?u=${encodeURIComponent(absolute)}`;
+  };
+  const lines = text.split("\n");
+  const out = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) { out.push(line); continue; }
+    if (trimmed.startsWith("#")) {
+      // El master trae AMBAS pistas de audio (jpn Native + eng English) en el
+      // mismo EXT-X-STREAM-INF. Si onlyAudioLang viene seteado (?audio=jpn|eng
+      // desde el proxy_url que armamos por audio en streams.js), tiramos la
+      // línea EXT-X-MEDIA de la pista que NO se pidió, para que el player no
+      // tenga de dónde elegir la otra.
+      if (onlyAudioLang && /^#EXT-X-MEDIA:TYPE=AUDIO/.test(trimmed)) {
+        const langMatch = trimmed.match(/LANGUAGE="([^"]+)"/);
+        if (langMatch && langMatch[1] !== onlyAudioLang) continue;
+      }
+      let rewritten = line.replace(/URI="([^"]+)"/g, (_, uri) => {
+        try {
+          return `URI="${rewriteAbsolute(new URL(uri, baseUrl).href)}"`;
+        } catch {
+          return _;
+        }
+      });
+      if (onlyAudioLang && /^#EXT-X-MEDIA:TYPE=AUDIO/.test(trimmed)) {
+        rewritten = rewritten.replace(/DEFAULT=(YES|NO)/, "DEFAULT=YES").replace(/AUTOSELECT=(YES|NO)/, "AUTOSELECT=YES");
+      }
+      out.push(rewritten);
+      continue;
+    }
+    out.push(rewriteAbsolute(new URL(trimmed, baseUrl).href));
+  }
+  return out.join("\n");
+}
+
+router.get("/flixcloud-m3u8", async (req, res) => {
+  const target = req.query.u;
+  const onlyAudioLang = req.query.audio || null;
+  if (!target) return res.status(400).json({ error: "Missing u param" });
+  try {
+    const plainText = await fetchAndDecryptFlixcloudManifest(target, FLIXCLOUD_REFERER);
+    const proxyBase = getProxyBase(req);
+    const rewritten = rewriteFlixcloudPlaylist(plainText, target, proxyBase, onlyAudioLang);
+    res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+    setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
+    res.send(rewritten);
+  } catch (e) {
+    console.warn(`[flixcloud-m3u8] ERROR: ${e.message}`);
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+// Segmentos (.webp/.png disfrazados, ver decryptFlixcloudSegment): fetch +
+// strip del header falso + XOR de 16 bytes cuando corresponde → MPEG-TS real.
+router.get("/flixcloud-seg", async (req, res) => {
+  const target = req.query.u;
+  if (!target) return res.status(400).json({ error: "Missing u param" });
+  try {
+    const upstream = await fetch(target, {
+      headers: { "User-Agent": HEADERS["User-Agent"], Referer: FLIXCLOUD_REFERER, Origin: "https://flixcloud.cc" },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!upstream.ok) return res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
+    const raw = Buffer.from(await upstream.arrayBuffer());
+    const decrypted = decryptFlixcloudSegment(raw);
+    res.setHeader("Content-Type", "video/mp2t");
+    setCacheForResponse(res, "video/mp2t", target);
+    res.send(decrypted);
+  } catch (e) {
+    console.warn(`[flixcloud-seg] ERROR: ${e.message}`);
+    res.status(e.status || 500).json({ error: e.message });
+  }
 });
 
 // ── Generic HLS proxy ────────────────────────────────────────────────────────

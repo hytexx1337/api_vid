@@ -36,6 +36,7 @@ import {
   getCinejoyStream,
   getVideasyStream,
   getVixsrcStream,
+  getReanimeStreams,
   WANTED_ASS_LANGS,
 } from "../providers/index.js";
 
@@ -254,7 +255,7 @@ async function resolveAnimeData(anilistId, episode) {
     );
   };
 
-  const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult] = await Promise.allSettled([
+  const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult, reanimeResult] = await Promise.allSettled([
     timed2("animeav1", getLatinoStream(anilistId, episode)),
     timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode))),
     timed2("megavid", getMegavidStream(anilistId, parseInt(episode))),
@@ -263,6 +264,7 @@ async function resolveAnimeData(anilistId, episode) {
     timed2("miruro", getMiruroStreams(anilistId, parseInt(episode))),
     timed2("anikoto", getAnikotoStreams(anilistId, parseInt(episode))),
     timed2("aniskip", anilistToMal(anilistId).then(malId => getAnimeSkip(malId, parseInt(episode)))),
+    timed2("reanime", isProviderEnabled("reanime") ? getReanimeStreams(anilistId, episode) : Promise.resolve({ sub: null, dub: null })),
   ]);
   lap("allSettled done");
 
@@ -285,26 +287,28 @@ async function resolveAnimeData(anilistId, episode) {
   const megavid = megavidResult.status === "fulfilled" ? megavidResult.value : null;
   if (megavidResult.status === "rejected") console.warn("[anime] megavid ✗:", megavidResult.reason?.message);
 
-  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip };
+  const reanime = reanimeResult.status === "fulfilled" ? reanimeResult.value : { sub: null, dub: null };
+  if (reanimeResult.status === "rejected") console.warn("[anime] reanime ✗:", reanimeResult.reason?.message);
+
+  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip, reanime };
 }
 
 router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
 
-  // v4: excluye providers moo/bonk de Miruro — bump para invalidar entradas
-  // persistidas de antes de este cambio (si no, quedan colgados hasta que
-  // expire STREAM_TTL).
-  const cacheKey = `streams:anime:v4:${anilistId}:${episode}`;
+  // v5: agrega provider reanime (flixcloud) — bump para invalidar entradas
+  // persistidas de antes de este cambio.
+  const cacheKey = `streams:anime:v5:${anilistId}:${episode}`;
   let data = cacheGet(cacheKey);
 
   if (!data) {
     data = await resolveAnimeData(anilistId, episode);
-    const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length;
+    const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length || data.reanime?.sub || data.reanime?.dub;
     if (hasAny) cacheSet(cacheKey, data, STREAM_TTL);
   }
 
-  const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip } = data;
+  const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip, reanime } = data;
   const tracks = await buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub);
 
   const streams = [];
@@ -445,6 +449,29 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       s.proxy_url = `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(src.url)}&ref=${encodeURIComponent(src.referer)}`;
       streams.push(s);
     }
+  }
+
+  // reanime.to (flixcloud.cc) — el .m3u8 real viene cifrado (zstd + base64 +
+  // XOR fijo global, ver lib/flixcloud-decrypt.js); proxy_url apunta a nuestra
+  // ruta /flixcloud-m3u8 que lo descifra y reescribe sub-playlists/segmentos.
+  for (const [item, lang, audioTrack] of [
+    [reanime?.sub, "japanese", "jpn"],
+    [reanime?.dub, "en-dub", "eng"],
+  ]) {
+    if (!item?.url) continue;
+    const originalProvider = `reanime-${item.server}`;
+    const introRange = item.intro ? [item.intro.start, item.intro.end] : (item.introStart != null ? [item.introStart, item.introEnd] : null);
+    const outroRange = item.outro ? [item.outro.start, item.outro.end] : (item.outroStart != null ? [item.outroStart, item.outroEnd] : null);
+    const skip = (introRange || outroRange) ? { ...(introRange && { intro: introRange }), ...(outroRange && { outro: outroRange }) } : null;
+    const s = makeAnimeStream(proxyBase, item.url, "auto", lang, originalProvider, { skip });
+    // El master de flixcloud trae ambas pistas (jpn+eng) en el mismo m3u8;
+    // ?audio= le dice a /flixcloud-m3u8 que tire la pista que no corresponde.
+    s.proxy_url = `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(item.url)}&audio=${audioTrack}`;
+    if (item.thumbnails_vtt) {
+      s.thumbnailVtt = item.thumbnails_vtt;
+      s.thumbnailVttProxy = `${proxyBase}/fetch?url=${encodeURIComponent(item.thumbnails_vtt)}&ref=${encodeURIComponent("https://flixcloud.cc/")}&ct=${encodeURIComponent("text/vtt")}`;
+    }
+    streams.push(s);
   }
 
   if (streams.length === 0) return res.status(404).json({ error: "No streams found for this episode" });

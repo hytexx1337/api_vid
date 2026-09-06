@@ -23,3 +23,4 @@ export { getVidupStream } from "./scraper-vidup.js";
 export { getCinejoyStream } from "./scraper-cinejoy.js";
 export { getVidcoreStream, getVidrkSubs } from "./scraper-vidcore.js";
 export { getVixsrcStream } from "./scraper-vixsrc.js";
+export { getReanimeStreams } from "./reanime.js";
