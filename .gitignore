@@ -15,3 +15,6 @@ altcha.min.js
 voe-debug*.html
 scripts/_tmp-*
 *.env
+# Archivos locales del servidor
+subs-cache.tar.gz
+venv/
