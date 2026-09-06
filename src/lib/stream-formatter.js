@@ -10,8 +10,10 @@ export function normalizeLang(lang, originalProvider = "") {
   if (l === "eng") return { lang: "ENG", langLabel: "English" };
 
   if (l === "japanese" || l === "jap" || l.startsWith("ja") || l.includes("jap")) {
-    // Hardsub detection
-    if (op.includes("animeav1")) return { lang: "JAP-ES-HS", langLabel: "Japonés (sub español quemado)" };
+    // Hardsub detection. upnshare es un CDN alternativo usado dentro del
+    // pipeline de animeav1 (ver providers/scraper.js) — mismo contenido
+    // (japonés con sub español quemado), solo cambia el hosting del stream.
+    if (op.includes("animeav1") || op.includes("upnshare")) return { lang: "JAP-ES-HS", langLabel: "Japonés (sub español quemado)" };
     // hsub = hardsub real (sub quemado). anikoto da ambos: "anikoto-*" es
     // soft-sub y "anikoto-hsub-*" es el quemado — hay que mirar "hsub" y no
     // "anikoto" a secas para no etiquetar mal los soft-subs.
