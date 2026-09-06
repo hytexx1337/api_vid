@@ -6,6 +6,7 @@ import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { getProxyBase } from "../lib/proxy.js";
 import { buildTracks, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel } from "../lib/subtitles.js";
 import { sealProxyUrls } from "../lib/proxy-seal.js";
+import { filterPlayableStreams } from "../lib/stream-verify.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
 import {
   makeCuevanaStream,
@@ -287,9 +288,10 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
 
-  // v3: agrega provider megavid (ENG-DUB) — bump para invalidar entradas
-  // persistidas de antes de este cambio.
-  const cacheKey = `streams:anime:v3:${anilistId}:${episode}`;
+  // v4: excluye providers moo/bonk de Miruro — bump para invalidar entradas
+  // persistidas de antes de este cambio (si no, quedan colgados hasta que
+  // expire STREAM_TTL).
+  const cacheKey = `streams:anime:v4:${anilistId}:${episode}`;
   let data = cacheGet(cacheKey);
 
   if (!data) {
@@ -457,7 +459,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
   const sorted = sortStreams(streams);
   const grouped = [...sorted.filter(s => isDubLang(s.lang)), ...sorted.filter(s => !isDubLang(s.lang))];
-  const withDisplay = assignDisplayProviders(grouped);
+  const playable = await filterPlayableStreams(grouped);
+  const withDisplay = assignDisplayProviders(playable);
   res.json(sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks, downloads }, proxyBase));
 });
 

@@ -30,6 +30,10 @@ PROXY_KEY = bytes.fromhex("a54d389c18527d9fd3e7f0643e27edbe")
 
 BLOCKED_HOSTS = ["mewstream.buzz", "watching.onl", "mewcdn.buzz"]
 
+# Providers de Miruro descartados antes de siquiera pedirles el source (moo y
+# bonk suelen fallar la verificación de reproducibilidad río abajo).
+EXCLUDED_PROVIDERS = {"moo", "bonk"}
+
 _proxy_host_cache = {"value": None, "fetched_at": 0}
 
 
@@ -162,6 +166,8 @@ def _fetch_source(provider, episode_id, anilist_id, category):
 def resolve_category(providers, anilist_id, episode_number, category):
     tasks = []
     for provider in providers:
+        if provider in EXCLUDED_PROVIDERS:
+            continue
         episode_id = find_episode(providers, provider, category, episode_number)
         if episode_id:
             tasks.append((provider, episode_id))
