@@ -54,13 +54,17 @@ function handleError(res, err) {
 const R2_AUTO_ARCHIVE_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
   "ENG-DUB": ["megaplay", "anikoto", "megavid", "miruro"],
+  "JAP-ES-HS": ["animeav1"],
+  "JAP-EN-HS": ["anikoto-hsub", "miruro"],
 };
 
 // Devuelve TODOS los candidatos ordenados por prioridad de provider, para que
 // el job de archivado pueda caer al siguiente si el primero falla (ej. la URL
 // de megaplay existe pero está muerta al momento de descargar).
 function pickArchiveCandidates(streams, lang, priorityList) {
-  const candidates = streams.filter((s) => s.lang === lang && s.originalProvider !== "zenkai" && s.proxy_url);
+  // archiveHlsToR2 solo sabe parsear playlists m3u8: descarta candidatos mp4
+  // (ej. upnshare) para no gastar un intento que va a fallar seguro.
+  const candidates = streams.filter((s) => s.lang === lang && s.originalProvider !== "zenkai" && s.proxy_url && s.type !== "mp4");
   const ordered = [];
   for (const prefix of priorityList) {
     for (const s of candidates) {
@@ -308,7 +312,12 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   // Streams archivados en R2 (bucket propio, ver scripts/r2-select.js).
   // Van primero en el array para quedar como "CPT CDN 1" de su idioma: no
   // dependen de que el provider original siga vivo, no hace falta re-scrapear.
-  const R2_LANG_LABELS = { "ESP-LAT": "Español latino", "ENG-DUB": "Inglés (doblado)" };
+  const R2_LANG_LABELS = {
+    "ESP-LAT": "Español latino",
+    "ENG-DUB": "Inglés (doblado)",
+    "JAP-ES-HS": "Japonés (sub español quemado)",
+    "JAP-EN-HS": "Japonés (sub inglés quemado)",
+  };
   const r2Archived = getR2Archive(anilistId, episode);
   for (const [lang, entry] of Object.entries(r2Archived)) {
     try {

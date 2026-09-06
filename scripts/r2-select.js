@@ -3,8 +3,8 @@
  * agrupa los streams por idioma, elige 1 URL por grupo según prioridad de
  * provider, y archiva cada uno a R2 con archiveHlsToR2().
  *
- * Por ahora solo cubre ESP-LAT y ENG-DUB (los doblajes). Los grupos sub
- * (JAP-SUB, JAP-ES-HS, JAP-EN-HS) se agregan después.
+ * Cubre ESP-LAT, ENG-DUB, JAP-ES-HS y JAP-EN-HS. JAP-SUB queda afuera por
+ * ahora (soft-subs, menos prioritario).
  *
  * Uso:
  *   npm run r2:select -- <anilistId> <episode> [apiBase]
@@ -33,6 +33,8 @@ const apiBase = (apiBaseArg || `http://localhost:${process.env.PORT || 3005}`).r
 const GROUP_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
   "ENG-DUB": ["megaplay", "miruro", "anikoto"],
+  "JAP-ES-HS": ["animeav1"],
+  "JAP-EN-HS": ["anikoto-hsub", "miruro"],
 };
 
 function pickBest(streams, priorityList) {
@@ -63,7 +65,8 @@ async function main() {
   // archivan en paralelo. El cuello de botella es la descarga desde cada
   // provider, no la subida a R2.
   const jobs = Object.entries(GROUP_PRIORITY).map(async ([lang, priorityList]) => {
-    const candidates = streams.filter((s) => s.lang === lang && s.proxy_url);
+    // archiveHlsToR2 solo sabe parsear playlists m3u8, descartamos mp4 (ej. upnshare).
+    const candidates = streams.filter((s) => s.lang === lang && s.proxy_url && s.type !== "mp4");
     if (!candidates.length) {
       console.warn(`[${lang}] sin streams disponibles, se omite`);
       return;

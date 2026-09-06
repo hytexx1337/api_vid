@@ -9,10 +9,10 @@
  *   - `CONCURRENCY` jobs corren en paralelo como máximo; el resto espera en
  *     `queue`. Cada job baja un episodio completo (~150-300MB), así que no
  *     conviene muchos concurrentes para no saturar CPU/bandwidth del server.
- *     Por default en 2: coincide con la cantidad de grupos de idioma que
- *     archivamos hoy (ESP-LAT, ENG-DUB) — son origins distintos entre sí,
- *     así que no tiene sentido serializarlos (ver scripts/r2-select.js, que
- *     ya los corre en paralelo con Promise.all).
+ *     Por default en 4: coincide con la cantidad de grupos de idioma que
+ *     archivamos hoy (ESP-LAT, ENG-DUB, JAP-ES-HS, JAP-EN-HS) — son origins
+ *     distintos entre sí, así que no tiene sentido serializarlos (ver
+ *     scripts/r2-select.js, que ya los corre en paralelo con Promise.all).
  *   - Al terminar (OK o error) se libera el slot y se persiste en
  *     r2_archive (cache.js) solo si tuvo éxito.
  *
@@ -23,7 +23,7 @@
 import { archiveHlsToR2 } from "./hls-to-r2.js";
 import { upsertR2Archive } from "./cache.js";
 
-const CONCURRENCY = parseInt(process.env.R2_ARCHIVE_CONCURRENCY) || 2;
+const CONCURRENCY = parseInt(process.env.R2_ARCHIVE_CONCURRENCY) || 4;
 
 const queue = [];
 const inFlight = new Set();
