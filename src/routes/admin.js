@@ -144,6 +144,28 @@ router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Registra SOLO subtítulos manuales para un episodio, sin tocar r2_archive.
+// Usado cuando el panel sube un sub suelto (no necesita re-subir el m3u8).
+// Body: { animeId, episode, subs: [{ file, label, lang, kind? }] }
+router.post("/admin/api/register-subs", requireApiKey, express.json(), (req, res) => {
+  try {
+    const { animeId, episode, subs } = req.body || {};
+    if (!animeId || !episode || !Array.isArray(subs) || !subs.length) {
+      return res.status(400).json({ error: "Faltan campos: animeId, episode, subs[]" });
+    }
+    const subsRegistered = [];
+    for (const s of subs) {
+      if (!s?.file || !s?.label || !s?.lang) continue;
+      const file = path.basename(String(s.file));
+      if (addManualTrack({ animeId, episode, lang: s.lang, label: s.label, file, kind: s.kind || "subtitles" })) {
+        subsRegistered.push(file);
+      }
+    }
+    console.log(`[admin] register-subs ${animeId} ep${episode} → ${subsRegistered.length} sub(s)`);
+    res.json({ ok: true, subsRegistered });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.delete("/admin/api/r2-archive/:animeId/:episode/:lang", requireApiKey, (req, res) => {
   try {
     deleteR2Archive(req.params.animeId, req.params.episode, req.params.lang);
