@@ -175,24 +175,52 @@ export default {
     if (!response) {
       // Miss: traer el objeto COMPLETO (sin range) para guardar una única
       // copia en cache; Cloudflare resuelve los Range requests recortando
-      // esa copia automáticamente en los hits siguientes.
+      // esa copia automáticamente en los hits SIGUIENTES. Pero la entrada
+      // recién escrita con cache.put() no está garantizada disponible para
+      // un cache.match() inmediato en la MISMA request (consistencia
+      // eventual del edge) — si eso pasa y el request original traía
+      // Range, cache.match() devuelve null y como fallback se servía el
+      // objeto ENTERO con status 200 en vez de la porción pedida con 206.
+      // Un cliente que dependa del recorte exacto (Range-based buffering,
+      // <video> nativo, etc.) puede corromperse con esto. Por eso, en el
+      // miss, si hay Range, se recorta a mano ANTES de devolver.
       const object = await env.BUCKET.get(key);
       if (!object) return new Response("Not found", { status: 404 });
 
       const filename = key.split("/").pop();
+      const size = object.size;
       const headers = new Headers();
       headers.set("content-type", contentTypeFor(filename));
       headers.set("cache-control", `public, max-age=${EDGE_CACHE_TTL_SECONDS}, immutable`);
       headers.set("access-control-allow-origin", "*");
       headers.set("accept-ranges", "bytes");
-      headers.set("content-length", String(object.size));
+      headers.set("content-length", String(size));
 
-      const fullResponse = new Response(object.body, { status: 200, headers });
+      const bodyBuf = await object.arrayBuffer();
+      const fullResponse = new Response(bodyBuf, { status: 200, headers });
       await cache.put(cacheKeyRequest, fullResponse.clone());
 
-      // Volver a pedirla por match() para que, si el request original traía
-      // Range, se devuelva ya recortada (206) igual que en un hit real.
-      response = (await cache.match(cacheKeyRequest)) || fullResponse;
+      const rangeHeader = request.headers.get("range");
+      const parsedRange = rangeHeader && /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
+      if (parsedRange) {
+        let start = parsedRange[1] === "" ? 0 : parseInt(parsedRange[1], 10);
+        let end = parsedRange[2] === "" ? size - 1 : parseInt(parsedRange[2], 10);
+        if (parsedRange[1] === "" && parsedRange[2] !== "") {
+          // Suffix range: "bytes=-500" -> los últimos 500 bytes.
+          start = Math.max(0, size - parseInt(parsedRange[2], 10));
+          end = size - 1;
+        }
+        end = Math.min(end, size - 1);
+        if (start <= end && start < size) {
+          const sliced = bodyBuf.slice(start, end + 1);
+          const rangeHeaders = new Headers(headers);
+          rangeHeaders.set("content-range", `bytes ${start}-${end}/${size}`);
+          rangeHeaders.set("content-length", String(end - start + 1));
+          return new Response(sliced, { status: 206, headers: rangeHeaders });
+        }
+      }
+
+      response = fullResponse;
     }
 
     return response;
