@@ -42,6 +42,21 @@ function initDb() {
         PRIMARY KEY (anime_id, episode, lang)
       );
     `);
+    // Subtítulos subidos manualmente (panel r2-panel en VPS externo).
+    // file es el nombre del objeto en R2 bajo subs/ (ej: "manual-abc123.vtt").
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS manual_tracks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        anime_id TEXT NOT NULL,
+        episode TEXT NOT NULL,
+        lang TEXT NOT NULL,
+        label TEXT NOT NULL,
+        file TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'subtitles',
+        created_at INTEGER NOT NULL,
+        UNIQUE (anime_id, episode, file)
+      );
+    `);
     return dbInstance;
   } catch (e) {
     console.warn("[cache] node:sqlite no disponible, cache persistente deshabilitada:", e.message);
@@ -216,6 +231,57 @@ export function deleteR2Archive(animeId, episode, lang) {
   } catch (e) {
     console.warn("[cache] deleteR2Archive error:", e.message);
   }
+}
+
+// ── Tracks manuales (subs subidos desde el panel externo) ────────────────────
+// Se mergean en buildAnimeTracks junto a los de CR/megaplay. El archivo vive
+// en R2 bajo subs/ y se sirve con URL firmada igual que los subs de CR.
+export function addManualTrack({ animeId, episode, lang, label, file, kind = "subtitles" }) {
+  if (!db) return false;
+  try {
+    db.prepare(`
+      INSERT INTO manual_tracks (anime_id, episode, lang, label, file, kind, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(anime_id, episode, file) DO UPDATE SET
+        lang = excluded.lang,
+        label = excluded.label,
+        kind = excluded.kind
+    `).run(String(animeId), String(episode), lang, label, file, kind, Date.now());
+    return true;
+  } catch (e) {
+    console.warn("[cache] addManualTrack error:", e.message);
+    return false;
+  }
+}
+
+export function getManualTracks(animeId, episode) {
+  if (!db) return [];
+  try {
+    return db.prepare(
+      `SELECT id, lang, label, file, kind, created_at FROM manual_tracks WHERE anime_id = ? AND episode = ?`
+    ).all(String(animeId), String(episode));
+  } catch (e) {
+    console.warn("[cache] getManualTracks error:", e.message);
+    return [];
+  }
+}
+
+export function listAllManualTracks() {
+  if (!db) return [];
+  try {
+    return db.prepare(
+      `SELECT id, anime_id, episode, lang, label, file, kind, created_at FROM manual_tracks ORDER BY created_at DESC`
+    ).all();
+  } catch (e) {
+    console.warn("[cache] listAllManualTracks error:", e.message);
+    return [];
+  }
+}
+
+export function deleteManualTrack(id) {
+  if (!db) return;
+  try { db.prepare(`DELETE FROM manual_tracks WHERE id = ?`).run(id); }
+  catch (e) { console.warn("[cache] deleteManualTrack error:", e.message); }
 }
 
 export function timed(label, fn) {

@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
-import { cacheGet, cacheSet, timed, getR2Archive } from "../lib/cache.js";
+import { cacheGet, cacheSet, timed, getR2Archive, getManualTracks } from "../lib/cache.js";
 import { buildSignedR2Url } from "../lib/r2-seal.js";
 import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { getProxyBase } from "../lib/proxy.js";
@@ -146,7 +146,17 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   // Solo los tracks de megaplay (urls externas crudas) necesitan el
   // pipeline genérico de descarga/cacheo local.
   const processedMegaplay = megaplayTracks.length ? await buildTracks(megaplayTracks, proxyBase) : [];
-  const rawTracks = [...vttTracks, ...assTracks, ...processedMegaplay];
+
+  // Tracks manuales: subs subidos a R2 (subs/{file}) desde el panel externo
+  // y registrados en manual_tracks. Se sirven con URL firmada como los de CR.
+  const manualTracks = getManualTracks(anilistId, episode).map(t => ({
+    label: t.label,
+    lang: t.lang,
+    url: buildSignedR2Url(`subs/${t.file}`),
+    kind: t.kind || "subtitles",
+  }));
+
+  const rawTracks = [...vttTracks, ...assTracks, ...processedMegaplay, ...manualTracks];
   return rawTracks;
 }
 
