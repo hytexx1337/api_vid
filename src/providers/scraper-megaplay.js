@@ -12,6 +12,7 @@
  * para servir los segmentos HLS.
  */
 
+import crypto from "crypto";
 import { ANILIST_HEADERS } from "../config/constants.js";
 
 const BASE     = "https://megaplay.buzz";
@@ -111,19 +112,56 @@ async function fetchDataId(anilistId, episode, type = "dub") {
 }
 
 // ── Paso 2a: getSources megaplay (player nativo) ──────────────────────────────
+// 2026-09: megaplay cambió el formato. El cliente (newclient.min.js) reescribe
+// stream/getSources → stream/getSourcesNew, que devuelve sources.file en plano
+// apuntando a megap.akirax.buzz. El getSources viejo sigue respondiendo pero
+// sin sources: trae un campo "enc" = base64url(AES-256-CBC(JSON{file}))
+// con key/IV hardcodeadas en el bundle (ver abajo). Ojo: el host que devuelve
+// enc (cdn.imgnex.top) puede dar 403 según la IP — por eso getSourcesNew
+// es el camino principal.
+const ENC_KEY = Buffer.alloc(32); ENC_KEY.write("i?LMTAx0Q6,:}50U", "utf8");
+const ENC_IV  = Buffer.alloc(16); ENC_IV.write("W0;27ToaUpl_P%'c", "utf8");
+
+function decryptEncField(b64url) {
+  let t = String(b64url).replace(/-/g, "+").replace(/_/g, "/");
+  const pad = t.length % 4;
+  if (pad) t += "====".slice(pad);
+  const d = crypto.createDecipheriv("aes-256-cbc", ENC_KEY, ENC_IV);
+  const plain = Buffer.concat([d.update(Buffer.from(t, "base64")), d.final()]);
+  return JSON.parse(plain.toString("utf8"));
+}
+
 async function fetchSources(dataId, anilistId, episode, type) {
-  const url = `${BASE}/stream/getSources?id=${dataId}`;
-  const r = await fetch(url, {
-    headers: {
-      "User-Agent": UA,
-      "Referer": `${BASE}/stream/ani/${anilistId}/${episode}/${type}`,
-      "X-Requested-With": "XMLHttpRequest",
-      "Accept": "application/json",
-    },
-    signal: AbortSignal.timeout(12000),
+  const headers = {
+    "User-Agent": UA,
+    "Referer": `${BASE}/stream/ani/${anilistId}/${episode}/${type}`,
+    "X-Requested-With": "XMLHttpRequest",
+    "Accept": "application/json",
+  };
+
+  // Camino principal: getSourcesNew (sources.file en plano)
+  const r = await fetch(`${BASE}/stream/getSourcesNew?id=${dataId}`, {
+    headers, signal: AbortSignal.timeout(12000),
   });
-  if (!r.ok) throw new Error(`megaplay getSources HTTP ${r.status}`);
-  const data = await r.json();
+  if (r.ok) {
+    const data = await r.json();
+    if (data.sources?.file) return { data, cdnReferer: `${BASE}/` };
+  }
+
+  // Fallback: getSources viejo con campo "enc" cifrado
+  const r2 = await fetch(`${BASE}/stream/getSources?id=${dataId}`, {
+    headers, signal: AbortSignal.timeout(12000),
+  });
+  if (!r2.ok) throw new Error(`megaplay getSources HTTP ${r2.status}`);
+  const data = await r2.json();
+  if (!data.sources?.file && data.enc) {
+    try {
+      const dec = decryptEncField(data.enc); // { file: "..." }
+      if (dec?.file) data.sources = { file: dec.file, ...(dec.type && { type: dec.type }) };
+    } catch (e) {
+      console.warn(`[megaplay] enc decrypt falló: ${e.message}`);
+    }
+  }
   if (!data.sources?.file) throw new Error("megaplay: sin URL en getSources");
   return { data, cdnReferer: `${BASE}/` };
 }
