@@ -4,7 +4,7 @@ import { cacheGet, cacheSet, timed, getR2Archive, getManualTracks } from "../lib
 import { buildSignedR2Url } from "../lib/r2-seal.js";
 import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { getProxyBase } from "../lib/proxy.js";
-import { buildTracks, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel } from "../lib/subtitles.js";
+import { buildTracks, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel, detectTrackLang } from "../lib/subtitles.js";
 import { sealProxyUrls } from "../lib/proxy-seal.js";
 import { filterPlayableStreams } from "../lib/stream-verify.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
@@ -106,7 +106,7 @@ async function buildMovieTvTracks(tmdbId, type, season, episode, proxyBase) {
   return buildTracks(vidrkSubs, proxyBase);
 }
 
-async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub) {
+async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime) {
   const [crTracks] = await Promise.all([
     getCRSubsForAnime(anilistId, parseInt(episode)).then(r => r ?? []).catch(() => []),
   ]);
@@ -156,7 +156,38 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
     kind: t.kind || "subtitles",
   }));
 
-  const rawTracks = [...vttTracks, ...assTracks, ...processedMegaplay, ...manualTracks];
+  // Subtítulos de reanime.to (flixcloud.cc): se extraen del embed ANTES de
+  // decriptar la URL final del stream, así que quedan disponibles aunque el
+  // stream en sí termine dando 403 al reproducir (token de flixcloud vencido,
+  // ver /flixcloud-m3u8 en routes/proxy.js) — mejor tener subs sueltos que
+  // nada. La mayoría vienen en .srt (se convierten a .vtt en downloadSubtitles)
+  // y algunos en .ass por idioma.
+  const reanimeTracks = [];
+  const seenReanimeUrls = new Set();
+  for (const item of [reanime?.sub, reanime?.dub]) {
+    if (!item?.subtitles?.length) continue;
+    for (const s of item.subtitles) {
+      const url = s.url || s.file;
+      if (!url || seenReanimeUrls.has(url)) continue;
+      seenReanimeUrls.add(url);
+      // El embed de flixcloud expone { url, language, format, default } —
+      // `language` es el label completo ("English (Full Subtitles [...])"),
+      // no hay `label`/`lang` separados. detectTrackLang saca el código de
+      // idioma del propio texto del label.
+      const subLabel = s.language || s.label || "";
+      reanimeTracks.push({
+        label: normalizeSubLabel(subLabel, null) || subLabel || "Unknown",
+        lang: s.lang || detectTrackLang(url, subLabel),
+        url,
+        kind: (s.format === "ass" || /\.ass(\?|$)/i.test(url)) ? "subtitles" : "captions",
+        referer: "https://flixcloud.cc/",
+        ...(s.default && { default: true }),
+      });
+    }
+  }
+  const processedReanime = reanimeTracks.length ? await buildTracks(reanimeTracks, proxyBase) : [];
+
+  const rawTracks = [...vttTracks, ...assTracks, ...processedMegaplay, ...manualTracks, ...processedReanime];
   return rawTracks;
 }
 
@@ -307,9 +338,11 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
 
-  // v5: agrega provider reanime (flixcloud) — bump para invalidar entradas
-  // persistidas de antes de este cambio.
-  const cacheKey = `streams:anime:v5:${anilistId}:${episode}`;
+  // v7: el manifest de flixcloud ahora se desencripta con una clave dinámica
+  // por-embed (WASM __pk) que viaja en manifest_key → proxy_url &k=. Las
+  // entradas v6 no la tienen y devolverían m3u8 corrupto — bump para
+  // invalidarlas.
+  const cacheKey = `streams:anime:v7:${anilistId}:${episode}`;
   let data = cacheGet(cacheKey);
 
   if (!data) {
@@ -319,7 +352,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   }
 
   const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip, reanime } = data;
-  const tracks = await buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub);
+  const tracks = await buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
 
   const streams = [];
 
@@ -476,7 +509,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     const s = makeAnimeStream(proxyBase, item.url, "auto", lang, originalProvider, { skip });
     // El master de flixcloud trae ambas pistas (jpn+eng) en el mismo m3u8;
     // ?audio= le dice a /flixcloud-m3u8 que tire la pista que no corresponde.
-    s.proxy_url = `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(item.url)}&audio=${audioTrack}`;
+    s.proxy_url = `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(item.url)}&audio=${audioTrack}${item.manifest_key ? `&k=${encodeURIComponent(item.manifest_key)}` : ""}`;
     if (item.thumbnails_vtt) {
       s.thumbnailVtt = item.thumbnails_vtt;
       s.thumbnailVttProxy = `${proxyBase}/fetch?url=${encodeURIComponent(item.thumbnails_vtt)}&ref=${encodeURIComponent("https://flixcloud.cc/")}&ct=${encodeURIComponent("text/vtt")}`;

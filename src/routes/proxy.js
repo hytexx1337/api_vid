@@ -109,11 +109,12 @@ router.get("/upn-seg", async (req, res) => {
 // pasan por /flixcloud-seg, no por el /ts-proxy genérico.
 const FLIXCLOUD_REFERER = "https://flixcloud.cc/";
 
-function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang) {
+function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang, manifestKey) {
+  const keyParam = manifestKey ? `&k=${encodeURIComponent(manifestKey)}` : "";
   const rewriteAbsolute = (absolute) => {
     if (absolute.includes(".m3u8")) {
       const audioParam = onlyAudioLang ? `&audio=${encodeURIComponent(onlyAudioLang)}` : "";
-      return `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(absolute)}${audioParam}`;
+      return `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(absolute)}${audioParam}${keyParam}`;
     }
     return `${proxyBase}/flixcloud-seg?u=${encodeURIComponent(absolute)}`;
   };
@@ -153,16 +154,24 @@ function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang) {
 router.get("/flixcloud-m3u8", async (req, res) => {
   const target = req.query.u;
   const onlyAudioLang = req.query.audio || null;
+  const manifestKey = req.query.k || null;
   if (!target) return res.status(400).json({ error: "Missing u param" });
   try {
-    const plainText = await fetchAndDecryptFlixcloudManifest(target, FLIXCLOUD_REFERER);
+    const plainText = await fetchAndDecryptFlixcloudManifest(target, FLIXCLOUD_REFERER, manifestKey);
     const proxyBase = getProxyBase(req);
-    const rewritten = rewriteFlixcloudPlaylist(plainText, target, proxyBase, onlyAudioLang);
+    const rewritten = rewriteFlixcloudPlaylist(plainText, target, proxyBase, onlyAudioLang, manifestKey);
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
     res.send(rewritten);
   } catch (e) {
     console.warn(`[flixcloud-m3u8] ERROR: ${e.message}`);
+    // La URL del stream que decripta extractFlixcloud() queda cacheada en
+    // streams:anime:v5:* con STREAM_TTL (7 días), pero el token de flixcloud
+    // que esa URL codifica vence mucho antes (probablemente minutos/horas).
+    // Sin esto, una vez vencido el token, TODOS los pedidos de ese episodio
+    // devuelven 403 durante hasta 7 días — invalidamos la entrada cacheada
+    // para forzar un re-resolve (nuevo embed + nuevo token) en el próximo GET.
+    if (e.status === 403 || e.status === 404) invalidateStreamsContainingUrl(target);
     res.status(e.status || 500).json({ error: e.message });
   }
 });
@@ -177,7 +186,10 @@ router.get("/flixcloud-seg", async (req, res) => {
       headers: { "User-Agent": HEADERS["User-Agent"], Referer: FLIXCLOUD_REFERER, Origin: "https://flixcloud.cc" },
       signal: AbortSignal.timeout(20000),
     });
-    if (!upstream.ok) return res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
+    if (!upstream.ok) {
+      if (upstream.status === 403 || upstream.status === 404) invalidateStreamsContainingUrl(target);
+      return res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
+    }
     const raw = Buffer.from(await upstream.arrayBuffer());
     const decrypted = decryptFlixcloudSegment(raw);
     res.setHeader("Content-Type", "video/mp2t");

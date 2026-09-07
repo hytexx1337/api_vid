@@ -182,6 +182,7 @@ async function resolveReanimeStream(anilistId, audio, ep) {
         introEnd: watchData?.intro_end ?? null,
         outroStart: watchData?.outro_start ?? null,
         outroEnd: watchData?.outro_end ?? null,
+        manifest_key: stream.manifest_key ?? null,
       };
     } catch (e) {
       errors.push(`${server.serverName}: ${e.message}`);

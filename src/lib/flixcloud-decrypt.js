@@ -40,11 +40,25 @@ function decompressByEncoding(buf, encoding) {
 // Descifra el body crudo (ya con Content-Encoding removido a nivel HTTP si el
 // cliente HTTP lo hizo automáticamente; si no, encoding indica cómo destaparlo
 // manualmente antes del paso base64+XOR).
-export function decryptFlixcloudManifest(rawBuf, contentEncoding) {
+// manifestKeyB64: clave dinámica de 32 bytes (base64) derivada del WASM del
+// embed (window.__pk en el player). Si viene, se usa en lugar de la clave
+// estática — flixcloud rotó a clave por-embed en 2026-09.
+export function decryptFlixcloudManifest(rawBuf, contentEncoding, manifestKeyB64 = null) {
   const b64Text = decompressByEncoding(rawBuf, contentEncoding).toString("utf8");
-  const cipherBytes = Buffer.from(b64Text, "base64");
-  const plain = xorWithKey(cipherBytes, FLIXCLOUD_XOR_KEY);
-  return plain.toString("utf8");
+  const cipherBytes = Buffer.from(b64Text.trim(), "base64");
+  const keys = [];
+  if (manifestKeyB64) {
+    const k = Buffer.from(manifestKeyB64, "base64");
+    if (k.length) keys.push(k);
+  }
+  keys.push(FLIXCLOUD_XOR_KEY);
+  for (const key of keys) {
+    const plain = xorWithKey(cipherBytes, key).toString("utf8");
+    if (plain.startsWith("#EXTM3U")) return plain;
+  }
+  // Ninguna clave produjo un m3u8 válido: devolver el intento con la clave
+  // dinámica (o la estática) para que el error upstream sea visible.
+  return xorWithKey(cipherBytes, keys[0]).toString("utf8");
 }
 
 // Los "segmentos" (.webp/.png) también van cifrados, pero con un esquema
@@ -76,7 +90,7 @@ export function decryptFlixcloudSegment(buf) {
   return out;
 }
 
-export async function fetchAndDecryptFlixcloudManifest(targetUrl, referer = "https://flixcloud.cc/") {
+export async function fetchAndDecryptFlixcloudManifest(targetUrl, referer = "https://flixcloud.cc/", manifestKeyB64 = null) {
   const upstream = await fetch(targetUrl, {
     headers: {
       "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -91,5 +105,5 @@ export async function fetchAndDecryptFlixcloudManifest(targetUrl, referer = "htt
   }
   const buf = Buffer.from(await upstream.arrayBuffer());
   const encoding = upstream.headers.get("content-encoding");
-  return decryptFlixcloudManifest(buf, encoding);
+  return decryptFlixcloudManifest(buf, encoding, manifestKeyB64);
 }

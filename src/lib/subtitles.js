@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { readFile, writeFile } from "fs/promises";
 import path from "path";
 import { fileURLToPath } from "url";
-import { removeSpamLines } from "./subtitle-cleaner.js";
+import { removeSpamLines, srtToVtt } from "./subtitle-cleaner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const SUBS_DIR = path.join(__dirname, "..", "..", "subs-cache");
@@ -100,8 +100,11 @@ export async function downloadSubtitles(tracks) {
     if (/\.ass(\?|$)/i.test(t.url)) return t;
 
     const hash = createHash("sha1").update(t.url).digest("hex");
-    const ext = /\.srt(\?|$)/i.test(t.url) ? "srt" : "vtt";
-    const filename = `${hash}.${ext}`;
+    // Siempre se guarda como .vtt: los .srt se convierten al vuelo (WebVTT es
+    // lo único que <track> / hls.js soportan nativamente — servir un .srt
+    // renombrado o con extensión propia no lo hace parseable en el browser).
+    const isSrt = /\.srt(\?|$)/i.test(t.url);
+    const filename = `${hash}.vtt`;
     const filepath = path.join(SUBS_DIR, filename);
 
     if (!existsSync(filepath)) {
@@ -114,7 +117,8 @@ export async function downloadSubtitles(tracks) {
       try {
         const r = await fetch(t.url, { headers, signal: AbortSignal.timeout(10000) });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const subText = removeSpamLines(await r.text());
+        let subText = removeSpamLines(await r.text());
+        if (isSrt) subText = srtToVtt(subText);
         await writeFile(filepath, subText, "utf8");
       } catch (e) {
         console.warn(`[subs] fallo descarga ${t.url}: ${e.message}`);

@@ -290,6 +290,31 @@ function runDecrypt(wasmBytes, fragment, keyFragment, token, seed) {
   return out;
 }
 
+// Instancia el WASM real (mismo camino que el player en flixcloud_node12.js):
+// _s(seed) -> _r(frag, kf2, token, out) -> _c() devuelve puntero a la clave
+// de 32 bytes que el player expone como window.__pk para desencriptar el
+// manifest .m3u8 (ver blob.blob ~1076012: atob(window.__pk) XOR atob(manifest)).
+async function runDecryptWasm(wasmBytes, fragment, keyFragment, token, seed) {
+  const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+  const exports = instance.exports;
+  const memory = exports.memory;
+  if (memory.buffer.byteLength === 0) memory.grow(1);
+  const S = new Uint8Array(memory.buffer);
+  const k = fragment.length;
+  const I = 1000, P = I + k, U = P + k, nt = U + k;
+  S.set(fragment, I);
+  S.set(keyFragment, P);
+  S.set(token, U);
+  exports._s(seed);
+  exports._r(I, P, U, nt, k);
+  const out = new Uint8Array(k);
+  out.set(S.subarray(nt, nt + k));
+  const exportNames = Object.keys(exports);
+  const pkPtr = typeof exports._c === "function" ? exports._c() : null;
+  const manifestKey = pkPtr ? new Uint8Array(memory.buffer).slice(pkPtr, pkPtr + 32) : null;
+  return { out, manifestKey, debug: `exports=[${exportNames.join(",")}] _c=${pkPtr}` };
+}
+
 export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase = "https://flixcloud.cc", headers = {}, referer } = {}) {
   const data = parseJsLiteral(extractSsrObj(embedHtml));
   const seed = data.obfuscation_seed;
@@ -358,11 +383,16 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
   const wasmPayload = b64toU8(data.w_payload ?? "");
   if (!wasmPayload.length) throw new Error("w_payload missing from embed data");
   let wasmOut;
+  let manifestKey = null;
+  let wasmDebug = null;
   try {
-    wasmOut = runDecrypt(wasmPayload, fragment, keyFragment, tokenBytes, seedNumber);
+    const res = await runDecryptWasm(wasmPayload, fragment, keyFragment, tokenBytes, seedNumber);
+    wasmOut = res.out;
+    manifestKey = res.manifestKey;
+    wasmDebug = res.debug ?? null;
   } catch (error) {
-    error.wasmHex = Array.from(wasmPayload).map((item) => item.toString(16).padStart(2, "0")).join("");
-    throw error;
+    wasmDebug = `wasm-error: ${error.message}`;
+    wasmOut = runDecrypt(wasmPayload, fragment, keyFragment, tokenBytes, seedNumber);
   }
   const material = await crypto.subtle.importKey("raw", wasmOut, { name: "PBKDF2" }, false, ["deriveBits"]);
   const derived = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt: encoder.encode(seed), iterations: 1e3, hash: "SHA-256" }, material, 256));
@@ -394,6 +424,8 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
     video_title: data.video_title ?? null,
     intro_chapter: data.intro_chapter ?? null,
     outro_chapter: data.outro_chapter ?? null,
-    video_id: data.video_id ?? null
+    video_id: data.video_id ?? null,
+    manifest_key: manifestKey ? Buffer.from(manifestKey).toString("base64") : null,
+    _wasm_debug: wasmDebug
   };
 }
