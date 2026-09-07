@@ -70,6 +70,11 @@ async function verifySig(secret, path, exp, sig) {
 
 function contentTypeFor(filename) {
   if (filename.startsWith("seg-")) return "video/mp2t";
+  // Pistas de audio separadas archivadas desde masters con EXT-X-MEDIA
+  // (ver processPlaylist en src/lib/hls-to-r2.js): aud- = MPEG-TS,
+  // audf- = fMP4/CMAF.
+  if (filename.startsWith("aud-")) return "video/mp2t";
+  if (filename.startsWith("audf-")) return "video/mp4";
   // Init segment y segmentos de media fMP4/CMAF (EXT-X-MAP presente en el
   // playlist original): son boxes MP4 reales. Receivers estrictos
   // (Chromecast/Shaka) usan este header para elegir el mimeType del
@@ -101,7 +106,9 @@ async function rewritePlaylist(text, dirPrefix, secret) {
   for (const rawLine of lines) {
     const trimmed = rawLine.trim();
 
-    if (/^#EXT-X-(KEY|MAP)/i.test(trimmed) && /URI="([^"]+)"/.test(trimmed)) {
+    // KEY/MAP/MEDIA llevan el recurso en URI="..." — MEDIA cubre las
+    // playlists de audio separadas (audio-N.m3u8) de masters archivados.
+    if (/^#EXT-X-(KEY|MAP|MEDIA)/i.test(trimmed) && /URI="([^"]+)"/.test(trimmed)) {
       const filename = trimmed.match(/URI="([^"]+)"/)[1];
       if (!filename.includes("://")) {
         const signed = await signSegmentLine(secret, dirPrefix, filename);

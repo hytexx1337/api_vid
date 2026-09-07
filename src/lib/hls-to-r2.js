@@ -122,36 +122,14 @@ function resolveUrl(uri, baseUrl) {
 }
 
 /**
- * Descarga y procesa un playlist m3u8: si es un master con múltiples
- * variantes de calidad, elige SOLO la de mayor BANDWIDTH y descarta el
- * resto (no tiene sentido archivar todas las calidades para 1 stream por
- * idioma). Sube segmentos/keys a R2 y devuelve el texto reescrito.
+ * Procesa una MEDIA playlist (sin variantes): sube keys, init segments (MAP)
+ * y segmentos a R2 con nombres relativos y devuelve el texto reescrito.
+ * tsPrefix/fmp4Prefix determinan el prefijo de los segmentos para que el
+ * Worker r2-cdn sepa el Content-Type real (seg-/fseg- para video,
+ * aud-/audf- para pistas de audio separadas).
  */
-async function processPlaylist(url, dirPrefix, counters) {
-  const { buf, ct } = await fetchBuffer(url);
-  if (!isM3U8(ct, buf)) throw new Error(`Se esperaba un m3u8 en ${url}, llegó Content-Type=${ct}`);
-
-  const text = buf.toString("utf8");
+async function processMediaPlaylist(text, url, dirPrefix, counters, tsPrefix = "seg-", fmp4Prefix = "fseg-") {
   const lines = text.split(/\r?\n/);
-
-  const variants = [];
-  for (let i = 0; i < lines.length; i++) {
-    const trimmed = lines[i].trim();
-    if (trimmed.startsWith("#EXT-X-STREAM-INF")) {
-      const bwMatch = trimmed.match(/BANDWIDTH=(\d+)/i);
-      const uriLine = lines[i + 1]?.trim();
-      if (uriLine && !uriLine.startsWith("#")) {
-        variants.push({ bandwidth: bwMatch ? parseInt(bwMatch[1], 10) : 0, uri: uriLine });
-      }
-    }
-  }
-
-  if (variants.length > 0) {
-    const best = variants.reduce((a, b) => (b.bandwidth > a.bandwidth ? b : a));
-    console.log(`  Master con ${variants.length} variante(s) de calidad, se descartan ${variants.length - 1} y se usa BANDWIDTH=${best.bandwidth}`);
-    const abs = resolveUrl(best.uri, url);
-    return processPlaylist(abs, dirPrefix, counters);
-  }
 
   // Media playlist (ya sin variantes): procesar keys, init segments (MAP) y segmentos.
   // IMPORTANTE: EXT-X-KEY (clave AES real) y EXT-X-MAP (init segment fMP4/CMAF,
@@ -166,6 +144,7 @@ async function processPlaylist(url, dirPrefix, counters) {
   // archivarlos con un prefijo distinto ("fseg-") para que el Worker los
   // sirva como video/mp4 en vez de video/mp2t.
   const isFmp4 = lines.some((l) => /^#EXT-X-MAP/i.test(l.trim()));
+  const segPrefix = isFmp4 ? fmp4Prefix : tsPrefix;
 
   const out = [];
   for (const rawLine of lines) {
@@ -197,11 +176,98 @@ async function processPlaylist(url, dirPrefix, counters) {
     if (!trimmed.startsWith("#") && trimmed) {
       const abs = resolveUrl(trimmed, url);
       const { buf: segBuf } = await fetchBuffer(abs);
-      const prefix = isFmp4 ? "fseg-" : "seg-";
-      const filename = `${prefix}${String(++counters.seg).padStart(5, "0")}${DISGUISED_SEGMENT_EXT}`;
+      const filename = `${segPrefix}${String(++counters.seg).padStart(5, "0")}${DISGUISED_SEGMENT_EXT}`;
       const { bytes } = await upload(`${dirPrefix}/${filename}`, segBuf, DISGUISED_CONTENT_TYPE);
       counters.bytes += bytes;
       out.push(filename);
+      continue;
+    }
+
+    out.push(rawLine);
+  }
+
+  return out.join("\n");
+}
+
+/**
+ * Descarga y procesa un playlist m3u8: si es un master con múltiples
+ * variantes de calidad, elige SOLO la de mayor BANDWIDTH y descarta el
+ * resto (no tiene sentido archivar todas las calidades para 1 stream por
+ * idioma). Sube segmentos/keys a R2 y devuelve el texto reescrito.
+ *
+ * Si el master declara pistas de audio separadas (#EXT-X-MEDIA:TYPE=AUDIO
+ * con URI= — ej. flixcloud, que manda jpn+eng en playlists aparte), también
+ * se archivan: cada audio playlist se procesa como media playlist con
+ * segmentos prefijados "aud-" y se guarda como audio-N.m3u8, la variante de
+ * video como video.m3u8, y se genera un master nuevo que los referencia.
+ * Sin esto el archivo quedaba mudo: el audio nunca se descargaba.
+ */
+async function processPlaylist(url, dirPrefix, counters, tsPrefix = "seg-", fmp4Prefix = "fseg-") {
+  const { buf, ct } = await fetchBuffer(url);
+  if (!isM3U8(ct, buf)) throw new Error(`Se esperaba un m3u8 en ${url}, llegó Content-Type=${ct}`);
+
+  const text = buf.toString("utf8");
+  const lines = text.split(/\r?\n/);
+
+  const variants = [];
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+    if (trimmed.startsWith("#EXT-X-STREAM-INF")) {
+      const bwMatch = trimmed.match(/BANDWIDTH=(\d+)/i);
+      const uriLine = lines[i + 1]?.trim();
+      if (uriLine && !uriLine.startsWith("#")) {
+        variants.push({ lineIndex: i, bandwidth: bwMatch ? parseInt(bwMatch[1], 10) : 0, uri: uriLine });
+      }
+    }
+  }
+
+  if (variants.length === 0) {
+    return processMediaPlaylist(text, url, dirPrefix, counters, tsPrefix, fmp4Prefix);
+  }
+
+  const best = variants.reduce((a, b) => (b.bandwidth > a.bandwidth ? b : a));
+  const audioMediaLines = lines.filter((l) => /^#EXT-X-MEDIA/i.test(l.trim()) && /TYPE=AUDIO/i.test(l) && /URI="[^"]+"/.test(l));
+
+  if (audioMediaLines.length === 0) {
+    console.log(`  Master con ${variants.length} variante(s) de calidad, se descartan ${variants.length - 1} y se usa BANDWIDTH=${best.bandwidth}`);
+    const abs = resolveUrl(best.uri, url);
+    return processPlaylist(abs, dirPrefix, counters, tsPrefix, fmp4Prefix);
+  }
+
+  // Master con audio separado: archivar video + cada pista de audio y
+  // generar un master propio que referencie los playlists locales.
+  console.log(`  Master con ${variants.length} variante(s) y ${audioMediaLines.length} pista(s) de audio — archivando video (BANDWIDTH=${best.bandwidth}) + audio`);
+
+  const videoText = await processPlaylist(resolveUrl(best.uri, url), dirPrefix, counters, tsPrefix, fmp4Prefix);
+  await upload(`${dirPrefix}/video.m3u8`, Buffer.from(videoText, "utf8"), "application/vnd.apple.mpegurl");
+
+  const out = [];
+  let audioIdx = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const trimmed = rawLine.trim();
+
+    if (trimmed.startsWith("#EXT-X-STREAM-INF")) {
+      // Solo queda la variante elegida, apuntando al playlist local de video.
+      if (i === best.lineIndex) {
+        out.push(rawLine);
+        out.push("video.m3u8");
+      }
+      i++; // saltar la línea URI de la variante
+      continue;
+    }
+
+    if (/^#EXT-X-MEDIA/i.test(trimmed)) {
+      // Pistas que no sean AUDIO (subtitles embebidos, etc.) se descartan:
+      // sus URIs apuntan a URLs del proxy que expiran.
+      if (!/TYPE=AUDIO/i.test(trimmed)) continue;
+      const m = trimmed.match(/URI="([^"]+)"/);
+      if (!m) { out.push(rawLine); continue; }
+      const abs = resolveUrl(m[1], url);
+      const audioText = await processPlaylist(abs, dirPrefix, counters, "aud-", "audf-");
+      const name = `audio-${audioIdx++}.m3u8`;
+      await upload(`${dirPrefix}/${name}`, Buffer.from(audioText, "utf8"), "application/vnd.apple.mpegurl");
+      out.push(rawLine.replace(/URI="([^"]+)"/, `URI="${name}"`));
       continue;
     }
 
