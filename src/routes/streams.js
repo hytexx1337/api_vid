@@ -402,7 +402,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip, reanime } = data;
   const tracks = await buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
 
-  const streams = [];
+  let streams = [];
 
   // Streams archivados en R2 (bucket propio, ver scripts/r2-select.js).
   // Van primero en el array para quedar como "CPT CDN 1" de su idioma: no
@@ -558,12 +558,18 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     // El master de flixcloud trae ambas pistas (jpn+eng) en el mismo m3u8;
     // ?audio= le dice a /flixcloud-m3u8 que tire la pista que no corresponde.
     s.proxy_url = `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(item.url)}&audio=${audioTrack}${item.manifest_key ? `&k=${encodeURIComponent(item.manifest_key)}` : ""}`;
+    if (item.downloadLink) downloads.push({ lang: s.lang, langLabel: s.langLabel, server: `reanime-${item.server}`, url: item.downloadLink });
     if (item.thumbnails_vtt) {
       s.thumbnailVtt = item.thumbnails_vtt;
       s.thumbnailVttProxy = `${proxyBase}/fetch?url=${encodeURIComponent(item.thumbnails_vtt)}&ref=${encodeURIComponent("https://flixcloud.cc/")}&ct=${encodeURIComponent("text/vtt")}`;
     }
     streams.push(s);
   }
+
+  // Dedupe por URL upstream: anikoto y megaplay pueden resolver al mismo
+  // master (megaplay.buzz) para el mismo episodio.
+  const seenUrls = new Set();
+  streams = streams.filter((s) => { if (seenUrls.has(s.url)) return false; seenUrls.add(s.url); return true; });
 
   if (streams.length === 0) return res.status(404).json({ error: "No streams found for this episode" });
 

@@ -17,20 +17,6 @@ const CACHE_TTL = 3 * 60 * 60 * 1000; // 3 horas
 const cache = new Map();
 const mediaCache = new Map();
 
-const MEGAPLAY_ORIGINS = new Set(["https://megaplay.buzz", "https://www.megaplay.buzz"]);
-
-function isMegaplayStream(hlsUrl, referer) {
-  try {
-    const urlObj = new URL(hlsUrl);
-    if (urlObj.hostname.includes("megaplay.buzz")) return true;
-  } catch {}
-  try {
-    const refObj = new URL(referer);
-    if (MEGAPLAY_ORIGINS.has(refObj.origin)) return true;
-  } catch {}
-  return false;
-}
-
 // ── Helpers HTTP ───────────────────────────────────────────────────────────────
 
 async function httpGet(url, headers = {}) {
@@ -208,10 +194,20 @@ async function extractEmbedSource(embedUrl) {
     const typeMatch = pageHtml.match(/type:\s*['"]([a-zA-Z]+)['"]/);
     const audioType = typeMatch?.[1];
     const typeQs = audioType ? `&type=${audioType}` : "";
-    const data = await getJSON(`${origin}/stream/getSources?id=${fileId}&id=${fileId}${typeQs}`, {
+    let data = await getJSON(`${origin}/stream/getSources?id=${fileId}&id=${fileId}${typeQs}`, {
       Referer: `${origin}/`,
       "X-Requested-With": "XMLHttpRequest",
     });
+    // El /getSources viejo de megaplay devuelve el m3u8 cifrado en el campo
+    // 'enc'; el master plano (y reproducible) viene de /getSourcesNew.
+    if (!data?.sources?.file) {
+      try {
+        data = await getJSON(`${origin}/stream/getSourcesNew?id=${fileId}`, {
+          Referer: `${origin}/`,
+          "X-Requested-With": "XMLHttpRequest",
+        });
+      } catch { /* seguimos con el resultado original */ }
+    }
     return { fileId, data, origin };
   } catch (e) {
     return null;
@@ -388,10 +384,6 @@ async function fetchAudioStreams(media, show, epNum, audio) {
 
     if (hlsUrl) {
       const referer = extracted?.origin ? `${extracted.origin}/` : `${new URL(embedUrl).origin}/`;
-      if (isMegaplayStream(hlsUrl, referer)) {
-        console.log(`[anikoto] Ignorando stream de Megaplay: ${hlsUrl.slice(0, 80)}...`);
-        continue;
-      }
       const streamObj = {
         url: hlsUrl,
         type: "hls",

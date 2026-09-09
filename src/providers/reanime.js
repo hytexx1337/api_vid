@@ -169,11 +169,13 @@ async function resolveReanimeStream(anilistId, audio, ep) {
       const embedRes = await fetch(server.dataLink, { headers: { ...H, Referer: `${BASE}/` } });
       if (!embedRes.ok) throw new Error(`Embed fetch failed: ${embedRes.status}`);
       const stream = await extractFlixcloud(await embedRes.text(), { apiBase: FLIX, headers: H, referer: `${BASE}/` });
+      const downloadLink = server.dataLink.replace("/e/", "/d/");
       return {
         title: series.title,
         slug,
         server: server.serverName,
         url: stream.url,
+        downloadLink,
         subtitles: stream.subtitles ?? [],
         thumbnails_vtt: stream.thumbnails_vtt ?? null,
         intro: stream.intro_chapter ?? null,
