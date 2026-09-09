@@ -42,14 +42,33 @@ async function upnShareToM3U8(embedUrl) {
   const hex  = await r.text();
   const data = upnDecrypt(hex);
 
-  // Preferir la URL de Cloudflare (.txt) porque los segmentos son .woff2.
-  // El CDN origin (nginx detrás de CF) exige un token firmado `k`/`kx` en la
-  // query string — viene en data.pk y NO está incluido en data.cf directamente.
-  // Sin este token, el origin devuelve 403 aunque el Referer/headers sean correctos.
-  const base = data.cf ?? data.source ?? null;
-  const streamUrl = base && data.pk?.k && data.pk?.kx
-    ? `${base}${base.includes("?") ? "&" : "?"}k=${encodeURIComponent(data.pk.k)}&kx=${encodeURIComponent(data.pk.kx)}`
-    : base;
+  // El dominio del CDN en data.cf (fusionpeaknetworks.site, horizenbuild.online,
+  // etc.) rota y sus subdominios aleatorios no resuelven DNS — el player real
+  // usa los proxys propios de animeav1:
+  //   1) cfNative: URL ya firmada servida por animeav1.uns.bio/v4/pl/{host}/...
+  //   2) hlsmod:   UPN_BASE/hlsmod/{dominio-tiktok}{hlsVideoTiktok sin /hls}?v=
+  //      (streamingConfig.order indica el orden de preferencia del player)
+  //   3) cf+pk:    fallback — el origin exige el token k/kx de data.pk.
+  let streamUrl = null;
+  if (data.cfNative) {
+    streamUrl = data.cfNative;
+  } else if (data.hlsVideoTiktok) {
+    try {
+      const cfg = JSON.parse(data.streamingConfig || "{}");
+      const tt = cfg?.adjust?.Tiktok;
+      if (tt && !tt.disabled && tt.domain) {
+        const path = data.hlsVideoTiktok.replace(/^\/hls/, "");
+        const v = tt.params?.v ? `?v=${tt.params.v}` : "";
+        streamUrl = `${UPN_BASE}/hlsmod/${tt.domain}${path}${v}`;
+      }
+    } catch { /* streamingConfig inválido → fallback */ }
+  }
+  if (!streamUrl) {
+    const base = data.cf ?? data.source ?? null;
+    streamUrl = base && data.pk?.k && data.pk?.kx
+      ? `${base}${base.includes("?") ? "&" : "?"}k=${encodeURIComponent(data.pk.k)}&kx=${encodeURIComponent(data.pk.kx)}`
+      : base;
+  }
   if (!streamUrl) return null;
 
   // Thumbnails para preview en la barra de progreso
@@ -86,23 +105,51 @@ export async function getAnilistInfo(anilistId) {
   const cached = cacheGet(key);
   if (cached) return cached;
 
-  const q = `query($id:Int){Media(id:$id,type:ANIME){idMal title{romaji english} format}}`;
-  const res = await fetch("https://graphql.anilist.co", {
-    method: "POST",
-    headers: ANILIST_HEADERS,
-    body: JSON.stringify({ query: q, variables: { id: Number(anilistId) } }),
-    signal: AbortSignal.timeout(5000),
-  });
-  const json = await res.json();
-  const media = json?.data?.Media;
-  if (!media) throw Object.assign(new Error("Anime not found in AniList"), { status: 404 });
+  let result = null;
+  try {
+    const q = `query($id:Int){Media(id:$id,type:ANIME){idMal title{romaji english} format startDate{year}}}`;
+    const res = await fetch("https://graphql.anilist.co", {
+      method: "POST",
+      headers: ANILIST_HEADERS,
+      body: JSON.stringify({ query: q, variables: { id: Number(anilistId) } }),
+      signal: AbortSignal.timeout(5000),
+    });
+    const json = await res.json();
+    const media = json?.data?.Media;
+    if (media) {
+      result = {
+        idMal:        media.idMal ?? null,
+        titleRomaji:  media.title?.romaji  || null,
+        titleEnglish: media.title?.english || null,
+        format:       media.format ?? null,
+        year:         media.startDate?.year ?? null,
+      };
+    }
+  } catch (e) {
+    console.warn(`[scraper] AniList falló para ${anilistId}: ${e.message} — probando ani.zip`);
+  }
 
-  const result = {
-    idMal:        media.idMal ?? null,
-    titleRomaji:  media.title?.romaji  || null,
-    titleEnglish: media.title?.english || null,
-    format:       media.format ?? null,
-  };
+  // Fallback: api.ani.zip (mappings + titles + airDate del ep 1 para el año).
+  // Cubre lo mismo que AniList para este uso: romaji (x-jat), english (en),
+  // mal_id, type y año.
+  if (!result) {
+    const r = await fetch(`https://api.ani.zip/mappings?anilist_id=${anilistId}`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    if (!r.ok) throw Object.assign(new Error("Anime not found in AniList"), { status: 404 });
+    const j = await r.json();
+    if (!j?.titles && !j?.mappings) throw Object.assign(new Error("Anime not found in AniList"), { status: 404 });
+    const airDate = j.episodes?.["1"]?.airDate;
+    result = {
+      idMal:        j.mappings?.mal_id ?? null,
+      titleRomaji:  j.titles?.["x-jat"] || j.titles?.en || null,
+      titleEnglish: j.titles?.en || null,
+      format:       j.mappings?.type ?? null,
+      year:         airDate ? parseInt(airDate.slice(0, 4), 10) : null,
+    };
+    console.log(`[scraper] ani.zip fallback OK para ${anilistId}: "${result.titleRomaji}" mal=${result.idMal} y=${result.year}`);
+  }
+
   cacheSet(key, result, 7 * 24 * 60 * 60 * 1000);
   return result;
 }
@@ -139,61 +186,119 @@ function extractSeasonOrdinal(str) {
   return m ? parseInt(m[1]) : null;
 }
 
-function pickBestSlug(results, malTitle) {
-  if (!results?.length) return null;
-  const normTitle    = malTitle.toLowerCase().trim();
-  const normStripped = normalizeTitle(malTitle);
-  const malSeason    = extractSeasonOrdinal(malTitle);
+// Números presentes en un string, ignorando años entre paréntesis "(2023)".
+function extractNumbers(str) {
+  const clean = str.replace(/\(\d{4}\)/g, "");
+  return new Set([...clean.matchAll(/\d+/g)].map(m => m[0]));
+}
+
+// Score de un resultado contra UN título: 2 = exacto/normalizado, si no Jaccard.
+function scoreAgainstTitle(r, title) {
+  const norm = title.toLowerCase().trim();
+  const stripped = normalizeTitle(title);
+  if (r.title.toLowerCase().trim() === norm) return 2;
+  if (normalizeTitle(r.title) === stripped) return 2;
+  if (normalizeTitle(r.slug) === stripped) return 2;
+  const titleTokens = new Set((title.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(w => w.length > 1));
+  const slugTokens  = new Set(r.slug.split("-").filter(t => t.length > 1));
+  for (const t of (r.title.toLowerCase().match(/[a-z0-9]+/g) ?? [])) if (t.length > 1) slugTokens.add(t);
+  const shared = [...titleTokens].filter(w => slugTokens.has(w)).length;
+  const union  = titleTokens.size + slugTokens.size - shared;
+  return union > 0 ? shared / union : 0;
+}
+
+// entries: [{ r: {id,title,slug}, rank }] — rank = mejor posición en los search.
+// titles: todos los títulos candidatos (romaji, english, ...) para scoring.
+function pickBestSlug(entries, titles, anilistYear = null) {
+  if (!entries?.length) return null;
+  let pool = entries;
 
   // Pre-filtro por "?" en el título
-  const malHasQuestion = malTitle.includes("?");
-  const filtered = results.filter(r => malHasQuestion
-    ? r.title.includes("?")
-    : !r.title.includes("?")
-  );
-  const pool = filtered.length > 0 ? filtered : results;
+  const wantQ = titles.some(t => t.includes("?"));
+  const qFiltered = pool.filter(e => wantQ ? e.r.title.includes("?") : !e.r.title.includes("?"));
+  if (qFiltered.length > 0) pool = qFiltered;
 
-  // Si el MAL title tiene número de temporada, preferir slugs que lo contengan
-  // y descartar los que tienen un número de temporada distinto
-  const seasonPool = malSeason
-    ? pool.filter(r => {
-        const slugSeason = extractSeasonOrdinal(r.slug) ?? extractSeasonOrdinal(r.title);
-        if (slugSeason === null) return true;    // sin número → no penalizar
-        return slugSeason === malSeason;         // descartar temporadas distintas
-      })
-    : pool;
-  const effectivePool = seasonPool.length > 0 ? seasonPool : pool;
-
-  // 1. Match exacto de título (case-insensitive)
-  let match = effectivePool.find(r => r.title.toLowerCase().trim() === normTitle);
-
-  // 2. Título normalizado sin puntuación
-  if (!match) match = effectivePool.find(r => normalizeTitle(r.title) === normStripped);
-
-  // 3. Slug normalizado vs título MAL normalizado
-  if (!match) match = effectivePool.find(r => normalizeTitle(r.slug) === normStripped);
-
-  // 4. Jaccard por tokens entre título MAL y slug
-  if (!match) {
-    const malTokens = new Set((malTitle.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(w => w.length > 1));
-    let bestScore = 0;
-    for (const r of effectivePool) {
-      const slugTokens = new Set(r.slug.split("-").filter(t => t.length > 1));
-      const shared = [...malTokens].filter(w => slugTokens.has(w)).length;
-      const union  = malTokens.size + slugTokens.size - shared;
-      const score  = union > 0 ? shared / union : 0;
-      if (score > bestScore) { bestScore = score; match = r; }
-    }
-    if (bestScore < 0.5) match = undefined;
+  // Desambiguación por año: si AniList dice 1996 y un resultado trae
+  // "(2023)" en el título, es un remake/otra versión → descartarlo.
+  if (anilistYear) {
+    const yearOk = pool.filter(e => {
+      const m = e.r.title.match(/\((\d{4})\)/);
+      return !m || parseInt(m[1], 10) === anilistYear;
+    });
+    if (yearOk.length > 0) pool = yearOk;
   }
 
-  return match?.slug ?? null;
+  // Si algún título tiene número de temporada, descartar temporadas distintas
+  const malSeason = titles.map(extractSeasonOrdinal).find(n => n !== null) ?? null;
+  if (malSeason) {
+    const seasonPool = pool.filter(e => {
+      const s = extractSeasonOrdinal(e.r.slug) ?? extractSeasonOrdinal(e.r.title);
+      return s === null || s === malSeason;
+    });
+    if (seasonPool.length > 0) pool = seasonPool;
+  }
+
+  // Match exacto/normalizado contra CUALQUIER título gana siempre — antes del
+  // filtro de números. Sin esto "Shin Evangelion Movie:||" (match exacto del
+  // romaji de Eva 3.0+1.0) perdía contra "Evangelion Movie 3: Q" solo porque
+  // el título inglés "3.0+1.0" contiene el dígito 3.
+  const exacts = pool.filter(e => titles.some(t => scoreAgainstTitle(e.r, t) === 2));
+  if (exacts.length > 0) {
+    // Los exactos ganan siempre y se saltan el filtro de números (un match
+    // exacto como "Shin Evangelion Movie:||" no tiene dígitos y el tier lo
+    // descartaría). Van primero; el resto queda como respaldo para la
+    // verificación por año en el caller.
+    exacts.sort((a, b) => a.rank - b.rank);
+    const rest = pool
+      .filter(e => !exacts.includes(e))
+      .map(e => ({ e, sum: titles.reduce((s, t) => s + scoreAgainstTitle(e.r, t), 0) }))
+      .sort((a, b) => b.sum - a.sum || a.e.rank - b.e.rank)
+      .map(s => s.e);
+    return [...exacts, ...rest].map(e => e.r.slug);
+  }
+
+  // Desambiguación por números del título ("Evangelion: 1.0" → {1,0}):
+  // tier A = resultados cuyos números son todos consistentes con los títulos,
+  // tier B = sin números, y se descartan los que traen números ajenos
+  // ("Evangelion Movie 3" cuando el título dice 1.0). Sin esto el Jaccard
+  // empataba "shin-evangelion-movie" (película 4) con "evangelion-movie-1-jo".
+  const titleNums = new Set();
+  for (const t of titles) for (const n of extractNumbers(t)) titleNums.add(n);
+  if (titleNums.size > 0) {
+    const tierA = [], tierB = [];
+    for (const e of pool) {
+      const nums = extractNumbers(`${e.r.title} ${e.r.slug}`);
+      if (nums.size === 0) { tierB.push(e); continue; }
+      if ([...nums].every(n => titleNums.has(n))) tierA.push(e);
+      // números ajenos → descartado
+    }
+    if (tierA.length > 0) pool = tierA;
+    else if (tierB.length > 0) pool = tierB;
+  }
+
+  // Scoring combinado contra TODOS los títulos: un resultado que matchea
+  // parcialmente romaji Y english gana al que solo matchea uno.
+  // Desempate final: mejor rank en los resultados del buscador.
+  const scored = [];
+  for (const e of pool) {
+    let sum = 0, max = 0;
+    for (const t of titles) {
+      const s = scoreAgainstTitle(e.r, t);
+      sum += s; if (s > max) max = s;
+    }
+    if (max >= 0.5) scored.push({ e, sum, max });
+  }
+  scored.sort((a, b) => b.sum - a.sum || a.e.rank - b.e.rank);
+  return scored.map(s => s.e.r.slug);
 }
 
 // titleRomaji/titleEnglish: si se pasan, se omite Jikan.
 // Intenta romaji primero (los slugs de animeav1 usan romaji), luego inglés como fallback.
-export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null) {
-  const key = `slug:${malId}`;
+export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null, anilistYear = null) {
+  // slug3: pool combinado de todas las queries + desambiguación por números
+  // del título — las entradas viejas pueden tener slugs erróneos cacheados
+  // (ej. Evangelion 1.0 → "shin-evangelion-movie" por empate de Jaccard).
+  const key = `slug3:${malId}`;
   const cached = cacheGet(key);
   if (cached) return cached;
 
@@ -228,10 +333,42 @@ export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null
     } catch { return false; }
   }
 
+  // Año mostrado en el media page de animeav1: el header tiene
+  // <span>Tipo</span> <span>•</span> <span>1990</span> — primer span de 4
+  // dígitos. Es la desambiguación definitiva cuando el título no alcanza
+  // (ej. "Episode of Bardock" 2011 vs el especial de 1990, ambos matchean
+  // "Bardock" por Jaccard).
+  async function fetchSlugYear(slug) {
+    try {
+      const r = await fetch(`${ANIMEAV1_BASE}/${slug}`, {
+        headers: PAGE_HEADERS, signal: AbortSignal.timeout(6000),
+      });
+      if (!r.ok) return null;
+      const html = await r.text();
+      const m = html.match(/<span>(\d{4})<\/span>/);
+      return m ? parseInt(m[1], 10) : null;
+    } catch { return null; }
+  }
+
+  // Pool combinado: slug → { r, rank } con el mejor rank visto entre todas
+  // las queries. Antes se evaluaba título por título y se devolvía el primer
+  // match — eso elegía "shin-evangelion-movie" (película 4) para Eva 1.0
+  // porque el Jaccard empataba y ganaba el orden del buscador.
+  const pool = new Map();
+  let narrowTop = null;
+  const addResults = (arr) => {
+    (arr || []).forEach((r, i) => {
+      if (!r?.slug) return;
+      const e = pool.get(r.slug);
+      if (!e) pool.set(r.slug, { r, rank: i });
+      else if (i < e.rank) e.rank = i;
+    });
+  };
+
   let lastError;
   for (const malTitle of titleCandidates) {
     try {
-      // Usar el título hasta el primer "!" como query de búsqueda.
+      // Usar el título hasta el primer ":" como query de búsqueda.
       // Si el split en ":" da menos de 4 chars (ej: "Re" de "Re:Zero"),
       // usar el título completo sin el número de temporada para mejor coincidencia.
       const splitColon = malTitle.split(":")[0].trim();
@@ -240,42 +377,59 @@ export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null
         ? splitColon
         : malTitle.replace(/\b\d+(?:st|nd|rd|th)\s+season\b/gi, "").replace(/[!]/g, "").trim();
 
-      // El buscador de animeav1 pagina/rankea mal queries genéricas (ej.
-      // "Dragon Ball Z" no trae especiales/OVAs entre los primeros resultados).
-      // Si el título tiene ":", la parte de DESPUÉS suele ser el subtítulo que
-      // distingue al especial/película del resto — probarla da mejores hits
-      // (ej. "Bardock – The Father of Goku" encuentra el especial que
-      // "Dragon Ball Z" solo no encuentra).
-      let slug = null;
       const results = await searchAnimeav1(keywords);
-      slug = pickBestSlug(results, malTitle);
+      console.log(`[scraper] search "${keywords}" → ${results.map(r => r.slug).join(", ") || "(sin resultados)"}`);
+      addResults(results);
 
-      // Si la query genérica no matchea (típico de especiales/OVAs, donde lo
-      // que distingue al título está justo DESPUÉS de los ":"), reintentar
-      // con esa parte específica. Ojo: NO reusamos el Jaccard de pickBestSlug
-      // acá — compara contra el título en inglés/romaji, y si el título
-      // mostrado en animeav1 está en español (común en specials/películas)
-      // puede preferir por error otro resultado que comparte palabras en
-      // inglés (ej. "Bardock") aunque sea un anime distinto. Al ser una
-      // query ya acotada a propósito, confiamos directo en el ranking de
-      // animeav1 cuando devuelve pocos resultados.
-      if (!slug && afterColon.length >= 4) {
-        const narrowResults = await searchAnimeav1(afterColon);
-        if (narrowResults.length > 0 && narrowResults.length <= 2) {
-          slug = narrowResults[0].slug;
-          console.log(`[scraper] malId=${malId} → match por ranking (query específica "${afterColon}"): "${slug}"`);
-        }
+      // Con títulos que tienen ":", la query corta ("Rurouni Kenshin") puede
+      // no devolver la entrada exacta — buscar también con el título completo.
+      if (malTitle.includes(":") && keywords !== malTitle) {
+        addResults(await searchAnimeav1(malTitle).catch(() => []));
       }
-      if (slug) {
-        console.log(`[scraper] malId=${malId} → "${malTitle}" → slug="${slug}"`);
-        cacheSet(key, slug, 7 * 24 * 60 * 60 * 1000);
-        return slug;
+
+      // Query acotada con la parte DESPUÉS de los ":" — distingue
+      // especiales/películas. Si devuelve pocos resultados, el top del
+      // ranking es confiable como fallback.
+      if (afterColon.length >= 4) {
+        const narrow = await searchAnimeav1(afterColon).catch(() => []);
+        addResults(narrow);
+        if (narrow.length > 0 && narrow.length <= 2) narrowTop = narrow[0].slug;
       }
-      lastError = Object.assign(new Error(`No match for "${malTitle}" in animeav1 search`), { status: 404 });
     } catch (e) {
       lastError = e;
     }
   }
+
+  const entries = [...pool.values()];
+  const ranked = pickBestSlug(entries, titleCandidates, anilistYear);
+  // La query específica (parte después de ":") es un candidato extra cuando
+  // devolvió pocos resultados — su top de ranking es confiable.
+  const candidates = [...ranked];
+  if (narrowTop && !candidates.includes(narrowTop)) candidates.push(narrowTop);
+
+  // Verificación por año: el media page de animeav1 muestra el año en un
+  // <span> del header. Si AniList da un año, el primer candidato cuyo año
+  // coincide gana — resuelve especiales/películas con títulos parecidos
+  // (ej. "Episode of Bardock" 2011 vs el especial de 1990).
+  let slug = null;
+  if (anilistYear && candidates.length > 1) {
+    const years = new Map();
+    for (const c of candidates.slice(0, 5)) {
+      const y = await fetchSlugYear(c);
+      years.set(c, y);
+      if (y === anilistYear) { slug = c; break; }
+    }
+    if (slug && slug !== candidates[0]) {
+      console.log(`[scraper] malId=${malId} → "${candidates[0]}" descartado por año (página dice ${years.get(candidates[0]) ?? "?"}, AniList ${anilistYear}) → "${slug}"`);
+    }
+  }
+  slug ??= candidates[0] ?? null;
+  if (slug) {
+    console.log(`[scraper] malId=${malId} → slug="${slug}" (de ${entries.length} candidatos)`);
+    cacheSet(key, slug, 7 * 24 * 60 * 60 * 1000);
+    return slug;
+  }
+  lastError ??= Object.assign(new Error(`No match for "${titleCandidates[0]}" in animeav1 search`), { status: 404 });
 
   // Fallback: construir slug desde el título romaji y verificar con HEAD
   // Ej: "Re:Zero kara Hajimeru Isekai Seikatsu 4th Season"
@@ -452,7 +606,7 @@ export async function getEpisodeOffset(anilistId) {
 
   try {
     // 1. Buscar PREQUEL TV/ONA en AniList — incluimos título del prequel para evitar Jikan
-    const q = `query($id:Int){Media(id:$id,type:ANIME){idMal title{romaji english} relations{edges{relationType node{id idMal format episodes title{romaji english}}}}}}`;
+    const q = `query($id:Int){Media(id:$id,type:ANIME){idMal title{romaji english} startDate{year} relations{edges{relationType node{id idMal format episodes title{romaji english} startDate{year}}}}}}`;
     const alRes = await fetch("https://graphql.anilist.co", {
       method: "POST",
       headers: ANILIST_HEADERS,
@@ -476,14 +630,16 @@ export async function getEpisodeOffset(anilistId) {
     const currentMalId      = mediaData?.idMal;
     const currentRomaji     = mediaData?.title?.romaji  || null;
     const currentEnglish    = mediaData?.title?.english || null;
+    const currentYear       = mediaData?.startDate?.year ?? null;
     const prequelRomaji     = prequelNode.title?.romaji  || null;
     const prequelEnglish    = prequelNode.title?.english || null;
+    const prequelYear       = prequelNode.startDate?.year ?? null;
 
     if (!currentMalId) { cacheSet(key, 0, TTL); return 0; }
 
     const [currentSlug, prequelSlug] = await Promise.all([
-      malIdToSlug(currentMalId, currentRomaji, currentEnglish).catch(() => null),
-      malIdToSlug(prequelNode.idMal, prequelRomaji, prequelEnglish).catch(() => null),
+      malIdToSlug(currentMalId, currentRomaji, currentEnglish, currentYear).catch(() => null),
+      malIdToSlug(prequelNode.idMal, prequelRomaji, prequelEnglish, prequelYear).catch(() => null),
     ]);
 
     // 3. Si mismo slug → verificar si los episodios son secuenciales en esa página.
@@ -558,7 +714,7 @@ export async function getLatinoStream(anilistId, episode) {
   if (!info.idMal) throw Object.assign(new Error("No MAL ID in AniList for this anime"), { status: 404 });
   const malId = info.idMal;
 
-  const slug = await malIdToSlug(malId, info.titleRomaji, info.titleEnglish);
+  const slug = await malIdToSlug(malId, info.titleRomaji, info.titleEnglish, info.year);
   lap(`slug="${slug}"`);
 
   const epNum = Number(episode) + offset;

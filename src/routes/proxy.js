@@ -525,13 +525,13 @@ router.get("/proxy", async (req, res) => {
   if (!url) return res.status(400).json({ error: "url is required" });
   const extraHeaders = parsHeaders(rawHeaders);
   try {
-    const { statusCode, body } = await proxyFetch(decodeURIComponent(url), { ...HEADERS, ...extraHeaders }, 20000);
+    const { statusCode, body } = await proxyFetch(url, { ...HEADERS, ...extraHeaders }, 20000);
     if (statusCode >= 400) return res.status(statusCode).json({ error: `Upstream error: ${statusCode}` });
     const chunks = [];
     for await (const chunk of body) chunks.push(chunk);
     const text = Buffer.concat(chunks).toString("utf-8");
     const proxyBase = getProxyBase(req);
-    const rewritten = rewriteM3U8(text, decodeURIComponent(url), proxyBase, extraHeaders);
+    const rewritten = rewriteM3U8(text, url, proxyBase, extraHeaders);
     res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
     setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
     res.send(rewritten);
@@ -542,9 +542,15 @@ router.get("/ts-proxy", async (req, res) => {
   const { url, headers: rawHeaders } = req.query;
   if (!url) return res.status(400).json({ error: "url is required" });
   const extraHeaders = parsHeaders(rawHeaders);
-  const decodedUrl = decodeURIComponent(url);
+  // req.query.url ya viene decodificado por Express — un decodeURIComponent
+  // extra corrompe las firmas (%2F → /) de URLs como las de tiktokcdn → 403.
+  const decodedUrl = url;
   try {
-    const { statusCode, headers: upHeaders, body } = await proxyFetch(decodedUrl, { ...HEADERS, ...extraHeaders });
+    const outHeaders = { ...HEADERS, ...extraHeaders };
+    const { statusCode, headers: upHeaders, body } = await proxyFetch(decodedUrl, outHeaders);
+    if (statusCode >= 400) {
+      console.warn(`[ts-proxy] ${statusCode} ${decodedUrl.slice(0, 120)}\n  out-headers: ${JSON.stringify(outHeaders)}`);
+    }
     if (statusCode >= 300 && statusCode < 400 && upHeaders.location) {
       for await (const _ of body) {}
       res.setHeader("Access-Control-Allow-Origin", "*");
@@ -553,7 +559,14 @@ router.get("/ts-proxy", async (req, res) => {
     if (statusCode >= 400) return res.status(statusCode).json({ error: `Upstream error: ${statusCode}` });
     const chunks = [];
     for await (const chunk of body) chunks.push(chunk);
-    const buffer = Buffer.concat(chunks);
+    let buffer = Buffer.concat(chunks);
+    // Megaplay CDN (tiktokcdn/akirax/etc): los segmentos TS vienen con 252
+    // bytes de PNG falso al inicio — el player los corta (SegmentStrip,
+    // STRIP_BYTES=252). Sin esto el segmento es un PNG inválido.
+    const STRIP_HOSTS_RE = /ibyteimg\.com|tiktokcdn\.com|ipstatp\.com|yoot\.akirax\.buzz/i;
+    if (STRIP_HOSTS_RE.test(decodedUrl) && buffer.length > 252) {
+      buffer = buffer.subarray(252);
+    }
     const text = buffer.toString("utf-8");
     const trimmed = text.trimStart();
     if (trimmed.startsWith("#EXTM3U") || trimmed.startsWith("#EXT-X-")) {
@@ -564,7 +577,7 @@ router.get("/ts-proxy", async (req, res) => {
       return res.send(rewritten);
     }
     let contentType = upHeaders["content-type"] ?? "video/mp2t";
-    const contentLength = upHeaders["content-length"];
+    const contentLength = buffer.length; // post-strip: el upstream ya no aplica
     const firstByte = buffer[0];
     const isTS = firstByte === 0x47;
     if (isTS || /^image\//.test(contentType) || /^text\/html/.test(contentType) || contentType === "application/octet-stream") contentType = "video/mp2t";
@@ -582,7 +595,7 @@ router.get("/fetch", async (req, res) => {
   const { url, ref, ct } = req.query;
   if (!url) return res.status(400).json({ error: "url is required" });
   try {
-    const { statusCode, headers: upHeaders, body } = await proxyFetch(decodeURIComponent(url), {
+    const { statusCode, headers: upHeaders, body } = await proxyFetch(url, {
       ...HEADERS,
       "Accept-Encoding": "identity",
       ...(ref ? { Referer: ref, Origin: new URL(ref).origin } : {}),
@@ -614,16 +627,31 @@ router.get("/fetch", async (req, res) => {
       const lines = text.split("\n");
       const spamLines = lines.filter((l) => l.includes("hoofoot.ru"));
       if (spamLines.length) {
-        console.log(`[fetch-filter] eliminando ${spamLines.length} línea(s) con hoofoot.ru (${decodeURIComponent(url).slice(0, 80)})`);
+        console.log(`[fetch-filter] eliminando ${spamLines.length} línea(s) con hoofoot.ru (${url.slice(0, 80)})`);
         text = lines.filter((l) => !l.includes("hoofoot.ru")).join("\n");
       }
     }
-    const decodedUrl = decodeURIComponent(url);
+    const decodedUrl = url; // req.query ya viene decodificado por Express
     const isVtt = contentType.includes("vtt") || decodedUrl.endsWith(".vtt");
     if (isVtt && text !== undefined) {
-      const vttBase = new URL(decodedUrl);
-      const basePath = vttBase.href.substring(0, vttBase.href.lastIndexOf("/") + 1);
-      text = text.replace(/^([\w.-]+\.webp(?:#[^\s]*)?)$/gm, (_, rel) => basePath + rel);
+      // Base para resolver rutas relativas de sprites. Si la URL del VTT no
+      // tiene extensión (flixcloud: /thumbnails_vtt/{uuid}), el UUID actúa
+      // como directorio → base = url + "/". Si termina en archivo (.vtt),
+      // base = directorio contenedor.
+      const lastSeg = decodedUrl.split("/").pop().split("?")[0];
+      const basePath = lastSeg.includes(".")
+        ? decodedUrl.substring(0, decodedUrl.lastIndexOf("/") + 1)
+        : decodedUrl.replace(/\/$/, "") + "/";
+      // Reescribir a /fetch proxied (no URL absoluta directa): hosts como
+      // fetch8.flixcloud.cc exigen Referer y devuelven 403/404 sin él.
+      const proxyBase = getProxyBase(req);
+      const refParam = ref ? `&ref=${encodeURIComponent(ref)}` : "";
+      text = text.replace(/^([\w./-]+\.(?:webp|jpg|jpeg|png)(#[^\s]*)?)$/gim, (m, rel, frag) => {
+        try {
+          const abs = new URL(rel, basePath).href;
+          return `${proxyBase}/fetch?url=${encodeURIComponent(abs)}${refParam}&ct=${encodeURIComponent("image/webp")}`;
+        } catch { return m; }
+      });
     }
     if (text !== undefined) {
       res.removeHeader("Content-Encoding");
@@ -644,7 +672,7 @@ router.get("/mp4-proxy", async (req, res) => {
   const extraHeaders = parsHeaders(rawHeaders);
   const range = req.headers.range;
   try {
-    const { statusCode, headers: upHeaders, body } = await proxyFetch(decodeURIComponent(url), { ...HEADERS, ...extraHeaders, ...(range ? { Range: range } : {}) });
+    const { statusCode, headers: upHeaders, body } = await proxyFetch(url, { ...HEADERS, ...extraHeaders, ...(range ? { Range: range } : {}) });
     if (statusCode >= 400 && statusCode !== 206) return res.status(statusCode).json({ error: `Upstream error: ${statusCode}` });
     const contentType = upHeaders["content-type"] ?? "video/mp4";
     const contentLength = upHeaders["content-length"];
@@ -654,7 +682,7 @@ router.get("/mp4-proxy", async (req, res) => {
     res.setHeader("Accept-Ranges", "bytes");
     if (contentLength) res.setHeader("Content-Length", contentLength);
     if (contentRange) res.setHeader("Content-Range", contentRange);
-    setCacheForResponse(res, contentType, decodeURIComponent(url));
+    setCacheForResponse(res, contentType, url);
     body.on("error", (e) => { if (!res.headersSent) res.destroy(); });
     res.on("close", () => body.destroy());
     body.pipe(res);
@@ -668,7 +696,7 @@ router.get("/ghost-proxy", async (req, res) => {
   const extraHeaders = parsHeaders(rawHeaders);
   try {
     const agent = new HttpsProxyAgent(decodeURIComponent(proxy));
-    const upstream = await fetch(decodeURIComponent(url), {
+    const upstream = await fetch(url, {
       headers: { ...HEADERS, ...extraHeaders },
       signal: AbortSignal.timeout(30000),
       agent,
@@ -676,7 +704,7 @@ router.get("/ghost-proxy", async (req, res) => {
     if (!upstream.ok) return res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
     const contentType = upstream.headers.get("content-type") ?? "application/octet-stream";
     res.setHeader("Content-Type", contentType);
-    setCacheForResponse(res, contentType, decodeURIComponent(url));
+    setCacheForResponse(res, contentType, url);
     const buffer = await upstream.arrayBuffer();
     res.send(Buffer.from(buffer));
   } catch (err) { res.status(502).json({ error: err.message }); }

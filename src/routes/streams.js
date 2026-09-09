@@ -3,10 +3,11 @@ import { STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
 import { cacheGet, cacheSet, timed, getR2Archive, getManualTracks } from "../lib/cache.js";
 import { buildSignedR2Url } from "../lib/r2-seal.js";
 import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
+import { isR2Configured } from "../lib/hls-to-r2.js";
 import { getProxyBase } from "../lib/proxy.js";
 import { buildTracks, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel, detectTrackLang } from "../lib/subtitles.js";
 import { sealProxyUrls } from "../lib/proxy-seal.js";
-import { filterPlayableStreams } from "../lib/stream-verify.js";
+import { filterPlayableStreams, prewarmVerify } from "../lib/stream-verify.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
 import {
   makeCuevanaStream,
@@ -84,6 +85,10 @@ function pickArchiveCandidates(streams, lang, priorityList) {
 // al dominio público (proxyBase); para el fetch interno del archivador se usa
 // loopback directo, evitando un salto de ida y vuelta por internet.
 function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase) {
+  // Sin credenciales R2 (ej. .env comentado en dev local) no encolar nada:
+  // archiveHlsToR2 fallaría en assertR2Env por cada candidato y solo
+  // ensuciaría el log.
+  if (!isR2Configured()) return;
   const internalBase = `http://127.0.0.1:${process.env.PORT || 8000}`;
   for (const [lang, priorityList] of Object.entries(R2_AUTO_ARCHIVE_PRIORITY)) {
     if (r2Archived[lang]) continue;
@@ -296,18 +301,63 @@ async function resolveAnimeData(anilistId, episode) {
     );
   };
 
+  // Prewarm del verify: apenas cada provider resuelve, disparamos la
+  // verificación de sus URLs upstream en background (queda cacheada bajo
+  // verify:{url}). Así el filterPlayableStreams del final es casi todo
+  // cache-hit en vez de empezar recién cuando el provider más lento termina.
+  // reanime/flixcloud NO se prewarma: su URL cruda está cifrada, solo se
+  // puede verificar a través del proxy local.
+  const pw = (s) => { try { prewarmVerify(s); } catch { /* nunca romper el flujo */ } };
+
   const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult, reanimeResult] = await Promise.allSettled([
-    timed2("animeav1", getLatinoStream(anilistId, episode)),
-    timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode))),
-    timed2("megavid", getMegavidStream(anilistId, parseInt(episode))),
-    timed2("cuevana", getCuevanaAnime(anilistId, parseInt(episode))),
+    timed2("animeav1", getLatinoStream(anilistId, episode).then(v => {
+      for (const s of v?.streams ?? []) pw({ url: s.cfUrl ?? s.url, type: "hls", originalProvider: s.provider ?? "animeav1" });
+      return v;
+    })),
+    timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode)).then(v => {
+      for (const it of [v?.dub, v?.sub]) if (it?.url) pw({ url: it.url, headers: it.headers, type: "hls", originalProvider: "megaplay" });
+      return v;
+    })),
+    timed2("megavid", getMegavidStream(anilistId, parseInt(episode)).then(v => {
+      if (v?.url) pw({ url: v.url, headers: { Referer: "https://megavid.buzz/" }, type: "hls", originalProvider: "megavid" });
+      return v;
+    })),
+    timed2("cuevana", getCuevanaAnime(anilistId, parseInt(episode)).then(v => {
+      for (const c of v ?? []) if (c?.url) pw({ url: c.url, headers: c.headers, type: c.url.includes(".mp4") ? "mp4" : "hls", originalProvider: "embed69" });
+      return v;
+    })),
     timed2("cr-subs", getCRSubsForAnime(anilistId, parseInt(episode))),
-    timed2("miruro", getMiruroStreams(anilistId, parseInt(episode))),
-    timed2("anikoto", getAnikotoStreams(anilistId, parseInt(episode))),
+    timed2("miruro", (isProviderEnabled("miruro") ? getMiruroStreams(anilistId, parseInt(episode)) : Promise.resolve({ dub: [], sub: [] })).then(v => {
+      for (const s of [...(v?.dub ?? []), ...(v?.sub ?? [])]) if (s?.url) pw({ url: s.url, headers: s.headers, type: "hls", originalProvider: `miruro-${s.provider}` });
+      return v;
+    })),
+    timed2("anikoto", getAnikotoStreams(anilistId, parseInt(episode)).then(v => {
+      for (const s of [...(v?.sub ?? []), ...(v?.dub ?? []), ...(v?.hsub ?? [])]) {
+        if (s?.url && (s.type === "hls" || s.url.includes(".m3u8"))) pw({ url: s.url, headers: { Referer: s.referer }, type: "hls", originalProvider: `anikoto-${s.server}` });
+      }
+      return v;
+    })),
     timed2("aniskip", anilistToMal(anilistId).then(malId => getAnimeSkip(malId, parseInt(episode)))),
     timed2("reanime", isProviderEnabled("reanime") ? getReanimeStreams(anilistId, episode) : Promise.resolve({ sub: null, dub: null })),
   ]);
   lap("allSettled done");
+
+  // Resumen consolidado: qué devolvió cada provider (o por qué falló).
+  // Sin esto, un provider caído solo se nota por ausencia de streams.
+  const providerSummary = [
+    ["animeav1",   latinoResult,    v => `${v?.streams?.length ?? 0} streams`],
+    ["megaplay",   megaplayResult,  v => `dub=${!!v?.dub} sub=${!!v?.sub}`],
+    ["megavid",    megavidResult,   v => (v?.url ? "ok" : "null")],
+    ["cuevana",    cuevanaResult,   v => `${v?.length ?? 0} streams`],
+    ["cr-subs",    crSubsResult,    v => `${v?.length ?? 0} tracks`],
+    ["miruro",     miruroResult,    v => `dub=${v?.dub?.length ?? 0} sub=${v?.sub?.length ?? 0}`],
+    ["anikoto",    anikotoResult,   v => `sub=${v?.sub?.length ?? 0} dub=${v?.dub?.length ?? 0}`],
+    ["aniskip",    aniskipResult,   v => (v ? "ok" : "null")],
+    ["reanime",    reanimeResult,   v => `sub=${!!v?.sub} dub=${!!v?.dub}`],
+  ].map(([name, r, fmt]) =>
+    r.status === "fulfilled" ? `${name}✓(${fmt(r.value)})` : `${name}✗(${r.reason?.message ?? "?"})`
+  ).join(" ");
+  console.log(`  [resolveAnime] providers: ${providerSummary}`);
 
   const aniskip = aniskipResult.status === "fulfilled" ? aniskipResult.value : null;
   if (aniskipResult.status === "rejected") console.warn("[anime] aniskip ✗:", aniskipResult.reason?.message);
@@ -333,18 +383,16 @@ async function resolveAnimeData(anilistId, episode) {
 
   return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip, reanime };
 }
-
 router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
 
-  // v7: el manifest de flixcloud ahora se desencripta con una clave dinámica
-  // por-embed (WASM __pk) que viaja en manifest_key → proxy_url &k=. Las
-  // entradas v6 no la tienen y devolverían m3u8 corrupto — bump para
-  // invalidarlas.
-  const cacheKey = `streams:anime:v7:${anilistId}:${episode}`;
+  // v9: fix doble-decode en /ts-proxy (corrompía firmas de segmentos megaplay)
+  const cacheKey = `streams:anime:v9:${anilistId}:${episode}`;
   let data = cacheGet(cacheKey);
+  if (data) console.log(`[anime] ${anilistId}/${episode} servido desde cache (providers no corrieron)`);
 
+  // ... rest of the code remains the same ...
   if (!data) {
     data = await resolveAnimeData(anilistId, episode);
     const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length || data.reanime?.sub || data.reanime?.dub;

@@ -136,7 +136,9 @@ function walkAndSeal(obj, proxyBase) {
   if (!obj || typeof obj !== "object") return;
   for (const key of Object.keys(obj)) {
     const val = obj[key];
-    if (typeof val === "string" && (key === "proxy_url" || key.endsWith("Proxy"))) {
+    // Los thumbnails quedan con el proxy normal /fetch: la URL /sealed/ rompe
+    // la preview de algunos reproductores (el token opaco no termina en .vtt/.jpg).
+    if (typeof val === "string" && (key === "proxy_url" || (key.endsWith("Proxy") && !key.startsWith("thumbnail")))) {
       obj[key] = maybeSeal(val, proxyBase);
     } else if (Array.isArray(val)) {
       for (const item of val) walkAndSeal(item, proxyBase);
