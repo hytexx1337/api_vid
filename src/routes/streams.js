@@ -566,10 +566,11 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     streams.push(s);
   }
 
-  // Dedupe por URL upstream: anikoto y megaplay pueden resolver al mismo
-  // master (megaplay.buzz) para el mismo episodio.
+  // Dedupe por URL final (proxy_url): anikoto y megaplay pueden resolver al
+  // mismo master, pero reanime sub/dub comparten el mismo upstream master
+  // y se diferencian en la query ?audio= del proxy.
   const seenUrls = new Set();
-  streams = streams.filter((s) => { if (seenUrls.has(s.url)) return false; seenUrls.add(s.url); return true; });
+  streams = streams.filter((s) => { const key = s.proxy_url || s.url; if (seenUrls.has(key)) return false; seenUrls.add(key); return true; });
 
   if (streams.length === 0) return res.status(404).json({ error: "No streams found for this episode" });
 
