@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
+import { STREAM_TTL, REANIME_STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
 import { cacheGet, cacheSet, timed, getR2Archive, getManualTracks } from "../lib/cache.js";
 import { buildSignedR2Url } from "../lib/r2-seal.js";
 import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
@@ -309,7 +309,7 @@ async function resolveAnimeData(anilistId, episode) {
   // puede verificar a través del proxy local.
   const pw = (s) => { try { prewarmVerify(s); } catch { /* nunca romper el flujo */ } };
 
-  const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult, reanimeResult] = await Promise.allSettled([
+  const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult] = await Promise.allSettled([
     timed2("animeav1", getLatinoStream(anilistId, episode).then(v => {
       for (const s of v?.streams ?? []) pw({ url: s.cfUrl ?? s.url, type: "hls", originalProvider: s.provider ?? "animeav1" });
       return v;
@@ -318,10 +318,10 @@ async function resolveAnimeData(anilistId, episode) {
       for (const it of [v?.dub, v?.sub]) if (it?.url) pw({ url: it.url, headers: it.headers, type: "hls", originalProvider: "megaplay" });
       return v;
     })),
-    timed2("megavid", getMegavidStream(anilistId, parseInt(episode)).then(v => {
+    timed2("megavid", (isProviderEnabled("megavid") ? getMegavidStream(anilistId, parseInt(episode)).then(v => {
       if (v?.url) pw({ url: v.url, headers: { Referer: "https://megavid.buzz/" }, type: "hls", originalProvider: "megavid" });
       return v;
-    })),
+    }) : Promise.resolve(null))),
     timed2("cuevana", getCuevanaAnime(anilistId, parseInt(episode)).then(v => {
       for (const c of v ?? []) if (c?.url) pw({ url: c.url, headers: c.headers, type: c.url.includes(".mp4") ? "mp4" : "hls", originalProvider: "embed69" });
       return v;
@@ -338,7 +338,6 @@ async function resolveAnimeData(anilistId, episode) {
       return v;
     })),
     timed2("aniskip", anilistToMal(anilistId).then(malId => getAnimeSkip(malId, parseInt(episode)))),
-    timed2("reanime", isProviderEnabled("reanime") ? getReanimeStreams(anilistId, episode) : Promise.resolve({ sub: null, dub: null })),
   ]);
   lap("allSettled done");
 
@@ -353,7 +352,6 @@ async function resolveAnimeData(anilistId, episode) {
     ["miruro",     miruroResult,    v => `dub=${v?.dub?.length ?? 0} sub=${v?.sub?.length ?? 0}`],
     ["anikoto",    anikotoResult,   v => `sub=${v?.sub?.length ?? 0} dub=${v?.dub?.length ?? 0}`],
     ["aniskip",    aniskipResult,   v => (v ? "ok" : "null")],
-    ["reanime",    reanimeResult,   v => `sub=${!!v?.sub} dub=${!!v?.dub}`],
   ].map(([name, r, fmt]) =>
     r.status === "fulfilled" ? `${name}✓(${fmt(r.value)})` : `${name}✗(${r.reason?.message ?? "?"})`
   ).join(" ");
@@ -378,26 +376,46 @@ async function resolveAnimeData(anilistId, episode) {
   const megavid = megavidResult.status === "fulfilled" ? megavidResult.value : null;
   if (megavidResult.status === "rejected") console.warn("[anime] megavid ✗:", megavidResult.reason?.message);
 
-  const reanime = reanimeResult.status === "fulfilled" ? reanimeResult.value : { sub: null, dub: null };
-  if (reanimeResult.status === "rejected") console.warn("[anime] reanime ✗:", reanimeResult.reason?.message);
-
-  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip, reanime };
+  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip };
 }
+
+async function getReanimeCached(anilistId, episode, cacheKey) {
+  const hit = cacheGet(cacheKey);
+  if (hit) return hit;
+  if (!isProviderEnabled("reanime")) return { sub: null, dub: null };
+  try {
+    const value = await getReanimeStreams(anilistId, episode);
+    cacheSet(cacheKey, value, REANIME_STREAM_TTL);
+    return value;
+  } catch (e) {
+    console.warn("[anime] reanime ✗:", e.message);
+    return { sub: null, dub: null };
+  }
+}
+
 router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
 
-  // v9: fix doble-decode en /ts-proxy (corrompía firmas de segmentos megaplay)
-  const cacheKey = `streams:anime:v9:${anilistId}:${episode}`;
+  // v10: reanime sub/dub fix + dedupe por proxy_url + reanime cache corto
+  const cacheKey = `streams:anime:v10:${anilistId}:${episode}`;
+  const reanimeCacheKey = `reanime:streams:v10:${anilistId}:${episode}`;
   let data = cacheGet(cacheKey);
+  let reanimeData = cacheGet(reanimeCacheKey);
   if (data) console.log(`[anime] ${anilistId}/${episode} servido desde cache (providers no corrieron)`);
+  if (reanimeData) console.log(`[anime] ${anilistId}/${episode} reanime servido desde cache`);
 
-  // ... rest of the code remains the same ...
   if (!data) {
     data = await resolveAnimeData(anilistId, episode);
-    const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length || data.reanime?.sub || data.reanime?.dub;
+    const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length;
     if (hasAny) cacheSet(cacheKey, data, STREAM_TTL);
+    if (!reanimeData) reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
+  } else if (!reanimeData) {
+    reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
+    cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
   }
+
+  data.reanime = reanimeData;
 
   const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip, reanime } = data;
   const tracks = await buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
