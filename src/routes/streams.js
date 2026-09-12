@@ -55,7 +55,8 @@ function handleError(res, err) {
 // Mismo criterio de prioridad de provider por idioma que scripts/r2-select.js.
 const R2_AUTO_ARCHIVE_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
-  "ENG-DUB": ["megaplay", "anikoto", "megavid", "miruro"],
+  "ENG-DUB": ["reanime", "megaplay", "anikoto", "megavid", "miruro"],
+  "JAP-SUB": ["reanime", "megaplay", "anikoto"],
   "JAP-ES-HS": ["animeav1"],
   "JAP-EN-HS": ["anikoto-hsub", "miruro"],
 };
@@ -428,6 +429,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const R2_LANG_LABELS = {
     "ESP-LAT": "Español latino",
     "ENG-DUB": "Inglés (doblado)",
+    "JAP-SUB": "Japonés (sub por separado)",
     "JAP-ES-HS": "Japonés (sub español quemado)",
     "JAP-EN-HS": "Japonés (sub inglés quemado)",
   };
@@ -449,6 +451,35 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     } catch (e) {
       console.warn(`[anime] r2 archive ${lang} sin firmar: ${e.message}`);
     }
+  }
+
+  const downloads = [];
+
+  // reanime.to (flixcloud.cc) — provider principal para ENG-DUB y JAP-SUB
+  // cuando está disponible: va primero que el resto de los providers vivos
+  // (después de los archivados en R2, que son nuestro propio CDN).
+  // El .m3u8 real viene cifrado (zstd + base64 + XOR fijo global, ver
+  // lib/flixcloud-decrypt.js); proxy_url apunta a nuestra ruta
+  // /flixcloud-m3u8 que lo descifra y reescribe sub-playlists/segmentos.
+  for (const [item, lang, audioTrack] of [
+    [reanime?.sub, "japanese", "jpn"],
+    [reanime?.dub, "en-dub", "eng"],
+  ]) {
+    if (!item?.url) continue;
+    const originalProvider = `reanime-${item.server}`;
+    const introRange = item.intro ? [item.intro.start, item.intro.end] : (item.introStart != null ? [item.introStart, item.introEnd] : null);
+    const outroRange = item.outro ? [item.outro.start, item.outro.end] : (item.outroStart != null ? [item.outroStart, item.outroEnd] : null);
+    const skip = (introRange || outroRange) ? { ...(introRange && { intro: introRange }), ...(outroRange && { outro: outroRange }) } : null;
+    const s = makeAnimeStream(proxyBase, item.url, "auto", lang, originalProvider, { skip });
+    // El master de flixcloud trae ambas pistas (jpn+eng) en el mismo m3u8;
+    // ?audio= le dice a /flixcloud-m3u8 que tire la pista que no corresponde.
+    s.proxy_url = `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(item.url)}&audio=${audioTrack}${item.manifest_key ? `&k=${encodeURIComponent(item.manifest_key)}` : ""}`;
+    if (item.downloadLink) downloads.push({ lang: s.lang, langLabel: s.langLabel, server: `reanime-${item.server}`, url: item.downloadLink });
+    if (item.thumbnails_vtt) {
+      s.thumbnailVtt = item.thumbnails_vtt;
+      s.thumbnailVttProxy = `${proxyBase}/fetch?url=${encodeURIComponent(item.thumbnails_vtt)}&ref=${encodeURIComponent("https://flixcloud.cc/")}&ct=${encodeURIComponent("text/vtt")}`;
+    }
+    streams.push(s);
   }
 
   // Megaplay DUB
@@ -482,7 +513,6 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     }
 
   // animeav1 — links de descarga directa (Mega, 1Fichier, MP4Upload, StreamTape)
-  const downloads = [];
   for (const [list, type] of [[latino?.downloads?.dub ?? [], "dub"], [latino?.downloads?.sub ?? [], "sub"]]) {
     if (!list.length) continue;
     const { lang, langLabel } = normalizeLang(type === "dub" ? "es-lat" : "japanese", "animeav1");
@@ -560,30 +590,6 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     }
   }
 
-  // reanime.to (flixcloud.cc) — el .m3u8 real viene cifrado (zstd + base64 +
-  // XOR fijo global, ver lib/flixcloud-decrypt.js); proxy_url apunta a nuestra
-  // ruta /flixcloud-m3u8 que lo descifra y reescribe sub-playlists/segmentos.
-  for (const [item, lang, audioTrack] of [
-    [reanime?.sub, "japanese", "jpn"],
-    [reanime?.dub, "en-dub", "eng"],
-  ]) {
-    if (!item?.url) continue;
-    const originalProvider = `reanime-${item.server}`;
-    const introRange = item.intro ? [item.intro.start, item.intro.end] : (item.introStart != null ? [item.introStart, item.introEnd] : null);
-    const outroRange = item.outro ? [item.outro.start, item.outro.end] : (item.outroStart != null ? [item.outroStart, item.outroEnd] : null);
-    const skip = (introRange || outroRange) ? { ...(introRange && { intro: introRange }), ...(outroRange && { outro: outroRange }) } : null;
-    const s = makeAnimeStream(proxyBase, item.url, "auto", lang, originalProvider, { skip });
-    // El master de flixcloud trae ambas pistas (jpn+eng) en el mismo m3u8;
-    // ?audio= le dice a /flixcloud-m3u8 que tire la pista que no corresponde.
-    s.proxy_url = `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(item.url)}&audio=${audioTrack}${item.manifest_key ? `&k=${encodeURIComponent(item.manifest_key)}` : ""}`;
-    if (item.downloadLink) downloads.push({ lang: s.lang, langLabel: s.langLabel, server: `reanime-${item.server}`, url: item.downloadLink });
-    if (item.thumbnails_vtt) {
-      s.thumbnailVtt = item.thumbnails_vtt;
-      s.thumbnailVttProxy = `${proxyBase}/fetch?url=${encodeURIComponent(item.thumbnails_vtt)}&ref=${encodeURIComponent("https://flixcloud.cc/")}&ct=${encodeURIComponent("text/vtt")}`;
-    }
-    streams.push(s);
-  }
-
   // Dedupe por URL final (proxy_url): anikoto y megaplay pueden resolver al
   // mismo master, pero reanime sub/dub comparten el mismo upstream master
   // y se diferencian en la query ?audio= del proxy.
@@ -598,13 +604,24 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   // Megaplay tiene los timestamps de intro/outro más precisos (por episodio,
   // no una estimación genérica). Se propagan a todos los streams del mismo
   // grupo dub/sub: megaplayDub.skip -> ESP-LAT, ENG-DUB, etc; megaplaySub.skip
-  // -> JAP-SUB, JAP-ES-HS, JAP-EN-HS. aniskip queda como último fallback solo
-  // si megaplay no tiene datos para ese grupo.
+  // -> JAP-SUB, JAP-ES-HS, JAP-EN-HS. Reanime conserva su propio skip (viene
+  // del embed de flixcloud, también por episodio) y sirve de fallback del
+  // grupo cuando megaplay no tiene datos. aniskip queda como último fallback.
   const isDubLang = (lang) => /DUB|LAT/.test(lang || "");
   const megaplayDubSkip = megaplayDub && Object.keys(megaplayDub.skip || {}).length ? megaplayDub.skip : null;
   const megaplaySubSkip = megaplaySub && Object.keys(megaplaySub.skip || {}).length ? megaplaySub.skip : null;
+  const reanimeSkipOf = (item) => {
+    if (!item) return null;
+    const intro = item.intro ? [item.intro.start, item.intro.end] : (item.introStart != null ? [item.introStart, item.introEnd] : null);
+    const outro = item.outro ? [item.outro.start, item.outro.end] : (item.outroStart != null ? [item.outroStart, item.outroEnd] : null);
+    return (intro || outro) ? { ...(intro && { intro }), ...(outro && { outro }) } : null;
+  };
+  const reanimeDubSkip = reanimeSkipOf(reanime?.dub);
+  const reanimeSubSkip = reanimeSkipOf(reanime?.sub);
   for (const s of streams) {
-    const preferred = isDubLang(s.lang) ? megaplayDubSkip : megaplaySubSkip;
+    const isReanime = String(s.originalProvider || "").startsWith("reanime");
+    if (isReanime && s.skip) continue;
+    const preferred = isDubLang(s.lang) ? (megaplayDubSkip ?? reanimeDubSkip) : (megaplaySubSkip ?? reanimeSubSkip);
     if (preferred) s.skip = preferred;
     else if (!s.skip && aniskip) s.skip = aniskip;
   }

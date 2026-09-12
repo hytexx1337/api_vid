@@ -32,7 +32,8 @@ const apiBase = (apiBaseArg || `http://localhost:${process.env.PORT || 3005}`).r
 // "megaplay", "miruro-hop", "anikoto-vidstream").
 const GROUP_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
-  "ENG-DUB": ["megaplay", "miruro", "anikoto"],
+  "ENG-DUB": ["reanime", "megaplay", "miruro", "anikoto"],
+  "JAP-SUB": ["reanime", "megaplay", "anikoto"],
   "JAP-ES-HS": ["animeav1"],
   "JAP-EN-HS": ["anikoto-hsub", "miruro"],
 };
