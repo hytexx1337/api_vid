@@ -56,7 +56,6 @@ function handleError(res, err) {
 const R2_AUTO_ARCHIVE_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
   "ENG-DUB": ["reanime", "megaplay", "anikoto", "megavid", "miruro"],
-  "JAP-SUB": ["reanime", "megaplay", "anikoto"],
   "JAP-ES-HS": ["animeav1"],
   "JAP-EN-HS": ["anikoto-hsub", "miruro"],
 };
