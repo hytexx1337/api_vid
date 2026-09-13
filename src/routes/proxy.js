@@ -33,6 +33,25 @@ router.use((req, res, next) => {
 
 router.use(proxyLimiter);
 
+// CDNs de megaplay bloqueados por IP/fingerprint → mirrors con el mismo
+// contenido. Los streams cacheados (persisten en disco) pueden traer URLs
+// viejas de nexabloom/mewstream; el rewrite acá las salva sin re-scrapear.
+// Solo se tocan playlists — los segmentos ya vienen en hosts propios
+// (tyrionx.top, tiktokcdn.com, etc.) que responden bien.
+function rewriteBlockedCdnHost(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname === "fetch.nexabloom.top") {
+      return `https://megap.norami.top${u.pathname.replace(/^\/anime/, "")}${u.search}`;
+    }
+    if (u.hostname === "cdn.mewstream.buzz") {
+      const m = u.pathname.match(/^\/anime\/(.+)/);
+      if (m) return `https://9hjkrt.nekostream.site/${m[1]}${u.search}`;
+    }
+    return url;
+  } catch { return url; }
+}
+
 // ── UPNShare HLS proxy ───────────────────────────────────────────────────────
 function rewriteUpnPlaylist(text, baseUrl, proxyBase, tokenQs = "") {
   const withToken = (abs) => (tokenQs && !abs.includes("?") ? `${abs}?${tokenQs}` : abs);
@@ -521,8 +540,9 @@ router.get("/dash-seg/:origin/*", async (req, res) => {
 
 // ── Legacy proxy routes ───────────────────────────────────────────────────────
 router.get("/proxy", async (req, res) => {
-  const { url, headers: rawHeaders } = req.query;
-  if (!url) return res.status(400).json({ error: "url is required" });
+  const { url: rawUrl, headers: rawHeaders } = req.query;
+  if (!rawUrl) return res.status(400).json({ error: "url is required" });
+  const url = rewriteBlockedCdnHost(rawUrl);
   const extraHeaders = parsHeaders(rawHeaders);
   try {
     const { statusCode, body } = await proxyFetch(url, { ...HEADERS, ...extraHeaders }, 20000);
@@ -544,7 +564,7 @@ router.get("/ts-proxy", async (req, res) => {
   const extraHeaders = parsHeaders(rawHeaders);
   // req.query.url ya viene decodificado por Express — un decodeURIComponent
   // extra corrompe las firmas (%2F → /) de URLs como las de tiktokcdn → 403.
-  const decodedUrl = url;
+  const decodedUrl = rewriteBlockedCdnHost(url);
   try {
     const outHeaders = { ...HEADERS, ...extraHeaders };
     const { statusCode, headers: upHeaders, body } = await proxyFetch(decodedUrl, outHeaders);

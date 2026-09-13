@@ -18,3 +18,10 @@ scripts/_tmp-*
 # Archivos locales del servidor
 subs-cache.tar.gz
 venv/
+_app.js
+_e1_new.js
+_hb.js
+_mp.js
+_mp2.js
+_mp3.js
+_nc_new.js

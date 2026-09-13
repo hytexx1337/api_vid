@@ -27,17 +27,32 @@ const CDN_HEADERS = {
 };
 
 /**
- * Convierte una URL de cdn.mewstream.buzz a nekostream.site.
- * mewstream.buzz bloquea IPs fuera de Asia; nekostream.site sirve el mismo
- * contenido (hashes idénticos) sin restricción geográfica.
+ * Reescribe hosts de CDN bloqueados a mirrors que sirven el mismo contenido.
  *
- * Ejemplo:
- *   cdn.mewstream.buzz/anime/{h1}/{h2}/master.m3u8
- *   → 9hjkrt.nekostream.site/{h1}/{h2}/master.m3u8
+ * - fetch.nexabloom.top: 403 openresty/Cloudflare para cualquier request
+ *   (bloqueo por IP/fingerprint). megap.norami.top es otro CDN oficial de
+ *   megaplay que sirve el mismo path SIN token ni prefijo /anime/.
+ * - cdn.mewstream.buzz: bloquea IPs fuera de Asia; nekostream.site sirve
+ *   el mismo contenido (hashes idénticos) sin restricción geográfica.
+ *
+ * Los segmentos NO se tocan: cada playlist ya apunta a hosts propios
+ * (tyrionx.top, tiktokcdn.com, etc.) que responden bien.
+ *
+ *   fetch.nexabloom.top/anime/{h1}/{h2}/master.m3u8 → megap.norami.top/{h1}/{h2}/master.m3u8
+ *   cdn.mewstream.buzz/anime/{h1}/{h2}/master.m3u8  → 9hjkrt.nekostream.site/{h1}/{h2}/master.m3u8
  */
-function mewToNeko(url) {
-  const m = url.match(/mewstream\.buzz\/anime\/([a-f0-9][\w/.-]+)/);
-  return m ? `https://9hjkrt.nekostream.site/${m[1]}` : null;
+function rewriteCdnHost(url) {
+  try {
+    const u = new URL(url);
+    if (u.hostname === "fetch.nexabloom.top") {
+      return `https://megap.norami.top${u.pathname.replace(/^\/anime/, "")}${u.search}`;
+    }
+    if (u.hostname === "cdn.mewstream.buzz") {
+      const m = u.pathname.match(/^\/anime\/(.+)/);
+      if (m) return `https://9hjkrt.nekostream.site/${m[1]}${u.search}`;
+    }
+    return url;
+  } catch { return url; }
 }
 
 // ── Cache ─────────────────────────────────────────────────────────────────────
@@ -216,7 +231,7 @@ async function fetchMegaplayByType(anilistId, episode, type) {
     .filter(t => t.kind === "captions" || t.kind === "subtitles")
     .map(t => ({ label: t.label, url: t.file, default: t.default ?? false, referer: cdnReferer }));
 
-  const streamUrl = data.sources.file;
+  const streamUrl = rewriteCdnHost(data.sources.file);
   const headers = { "Referer": cdnReferer, "Origin": new URL(cdnReferer).origin, "User-Agent": UA };
 
   return {
