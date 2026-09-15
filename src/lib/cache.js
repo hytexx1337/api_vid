@@ -42,6 +42,12 @@ function initDb() {
         PRIMARY KEY (anime_id, episode, lang)
       );
     `);
+    // Migración: columnas de skip intro/outro (segundos, NULL = sin skip).
+    // ALTER TABLE no soporta IF NOT EXISTS, así que se ignora el error de
+    // "duplicate column name" en bases que ya tienen las columnas.
+    for (const col of ["skip_intro_start", "skip_intro_end", "skip_outro_start", "skip_outro_end"]) {
+      try { dbInstance.exec(`ALTER TABLE r2_archive ADD COLUMN ${col} REAL`); } catch { /* ya existe */ }
+    }
     // Subtítulos subidos manualmente (panel r2-panel en VPS externo).
     // file es el nombre del objeto en R2 bajo subs/ (ej: "manual-abc123.vtt").
     dbInstance.exec(`
@@ -172,18 +178,25 @@ export function invalidateStreamsContainingUrl(url) {
 // slug es el prefijo de carpeta en R2 (ej: "21202-3-esp-lat"), donde vive
 // `${slug}/master.m3u8` + segmentos. No tiene TTL: el objeto queda ahí hasta
 // que se borre a mano o se reemplace.
-export function upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes }) {
+// skipIntro/skipOutro: [start, end] en segundos, o null/undefined si no hay.
+export function upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes, skipIntro, skipOutro }) {
   if (!db) return false;
   try {
+    const [iStart, iEnd] = Array.isArray(skipIntro) ? skipIntro : [null, null];
+    const [oStart, oEnd] = Array.isArray(skipOutro) ? skipOutro : [null, null];
     db.prepare(`
-      INSERT INTO r2_archive (anime_id, episode, lang, slug, source_provider, bytes, archived_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO r2_archive (anime_id, episode, lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(anime_id, episode, lang) DO UPDATE SET
         slug = excluded.slug,
         source_provider = excluded.source_provider,
         bytes = excluded.bytes,
-        archived_at = excluded.archived_at
-    `).run(String(animeId), String(episode), lang, slug, sourceProvider ?? null, bytes ?? null, Date.now());
+        archived_at = excluded.archived_at,
+        skip_intro_start = excluded.skip_intro_start,
+        skip_intro_end = excluded.skip_intro_end,
+        skip_outro_start = excluded.skip_outro_start,
+        skip_outro_end = excluded.skip_outro_end
+    `).run(String(animeId), String(episode), lang, slug, sourceProvider ?? null, bytes ?? null, Date.now(), iStart ?? null, iEnd ?? null, oStart ?? null, oEnd ?? null);
     return true;
   } catch (e) {
     console.warn("[cache] upsertR2Archive error:", e.message);
@@ -197,11 +210,15 @@ export function getR2Archive(animeId, episode) {
   if (!db) return {};
   try {
     const rows = db.prepare(
-      `SELECT lang, slug, source_provider, bytes, archived_at FROM r2_archive WHERE anime_id = ? AND episode = ?`
+      `SELECT lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end FROM r2_archive WHERE anime_id = ? AND episode = ?`
     ).all(String(animeId), String(episode));
     const out = {};
     for (const r of rows) {
-      out[r.lang] = { slug: r.slug, sourceProvider: r.source_provider, bytes: r.bytes, archivedAt: r.archived_at };
+      out[r.lang] = {
+        slug: r.slug, sourceProvider: r.source_provider, bytes: r.bytes, archivedAt: r.archived_at,
+        skipIntro: r.skip_intro_start != null ? [r.skip_intro_start, r.skip_intro_end] : null,
+        skipOutro: r.skip_outro_start != null ? [r.skip_outro_start, r.skip_outro_end] : null,
+      };
     }
     return out;
   } catch (e) {
@@ -215,7 +232,7 @@ export function listAllR2Archive() {
   if (!db) return [];
   try {
     return db.prepare(
-      `SELECT anime_id, episode, lang, slug, source_provider, bytes, archived_at FROM r2_archive`
+      `SELECT anime_id, episode, lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end FROM r2_archive`
     ).all();
   } catch (e) {
     console.warn("[cache] listAllR2Archive error:", e.message);

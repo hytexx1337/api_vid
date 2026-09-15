@@ -106,12 +106,16 @@ router.get("/admin/api/r2-archive", requireApiKey, (req, res) => {
 
 // Registra un episodio ya subido a R2 por el panel.
 // Body: { animeId, episode, lang, slug, bytes?, sourceProvider?,
+//         skipIntro?: [start,end], skipOutro?: [start,end],
 //         subs?: [{ file, label, lang, kind? }] }
+// skipIntro/skipOutro son rangos en segundos (opcionales) que el player usa
+// para el botón "saltar intro/outro" — mismo formato que el campo `skip`
+// que ya devuelven otros providers en /anime/:id/:episode.
 // El slug DEBE ser `${animeId}-${episode}-${lang.toLowerCase()}` — se valida
 // acá para que nadie registre un path arbitrario del bucket.
 router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, res) => {
   try {
-    const { animeId, episode, lang, slug, bytes, sourceProvider, subs } = req.body || {};
+    const { animeId, episode, lang, slug, bytes, sourceProvider, subs, skipIntro, skipOutro } = req.body || {};
     if (!animeId || !episode || !lang || !slug) {
       return res.status(400).json({ error: "Faltan campos: animeId, episode, lang, slug" });
     }
@@ -122,11 +126,19 @@ router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, 
     if (slug !== expectedSlug) {
       return res.status(400).json({ error: `slug inválido: se esperaba "${expectedSlug}"` });
     }
+    for (const [name, range] of [["skipIntro", skipIntro], ["skipOutro", skipOutro]]) {
+      if (range == null) continue;
+      if (!Array.isArray(range) || range.length !== 2 || range.some(v => typeof v !== "number" || !isFinite(v) || v < 0)) {
+        return res.status(400).json({ error: `${name} inválido: se esperaba [start, end] en segundos` });
+      }
+    }
 
     upsertR2Archive({
       animeId, episode, lang, slug,
       sourceProvider: sourceProvider || "manual",
       bytes: bytes ?? null,
+      skipIntro: skipIntro ?? null,
+      skipOutro: skipOutro ?? null,
     });
 
     const subsRegistered = [];

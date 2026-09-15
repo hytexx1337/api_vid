@@ -436,6 +436,11 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   for (const [lang, entry] of Object.entries(r2Archived)) {
     try {
       const signedUrl = buildSignedR2Url(`${entry.slug}/master.m3u8`);
+      // Mismo formato `skip` que usan los demás providers (ver makeAnimeStream):
+      // { intro: [start,end], outro: [start,end] } en segundos.
+      const skip = (entry.skipIntro || entry.skipOutro)
+        ? { ...(entry.skipIntro && { intro: entry.skipIntro }), ...(entry.skipOutro && { outro: entry.skipOutro }) }
+        : null;
       streams.push({
         url: signedUrl,
         quality: "auto",
@@ -446,6 +451,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
         originalProvider: "zenkai",
         sourceProvider: entry.sourceProvider,
         proxy_url: signedUrl,
+        ...(skip && { skip }),
       });
     } catch (e) {
       console.warn(`[anime] r2 archive ${lang} sin firmar: ${e.message}`);
