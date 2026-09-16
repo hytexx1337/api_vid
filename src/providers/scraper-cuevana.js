@@ -509,7 +509,7 @@ export async function getCuevanaAnime(anilistId, episode) {
 }
 
 // ── Test rápido ───────────────────────────────────────────────────────────────
-if (process.argv[1].includes("scraper-cuevana")) {
+if (process.argv[1]?.includes("scraper-cuevana")) {
   const args = process.argv.slice(2);
   const getArg = (name) => {
     const idx = args.indexOf(`--${name}`);

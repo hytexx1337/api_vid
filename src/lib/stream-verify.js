@@ -1,10 +1,10 @@
 /**
  * stream-verify.js — Verifica en runtime que un stream sea reproducible
  * antes de devolverlo en la respuesta (mismo criterio que
- * scripts/verify-streams.js): para HLS, descarga el master (y la variant
- * playlist si aplica) y confirma que liste segmentos — el segmento en sí no
- * se baja porque siempre pasa por el proxy local; para mp4/progresivo, un
- * GET con Range sobre la url directa.
+ * scripts/verify-streams.js): para HLS, descarga solo el master y confirma
+ * que sea un m3u8 válido — ni variants ni segmentos se bajan porque todo
+ * pasa por el proxy local; para mp4/progresivo, un GET con Range sobre la
+ * url directa.
  *
  * El resultado se cachea unos minutos por url upstream para no re-verificar
  * en cada pedido de la misma página/episodio.
@@ -23,26 +23,6 @@ async function fetchWithTimeout(url, opts = {}) {
   return fetch(url, { ...opts, headers, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
 }
 
-function resolveUri(uri, baseUrl) {
-  return new URL(uri.trim(), baseUrl).toString();
-}
-
-function parseM3u8(text) {
-  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
-  const variantUris = [];
-  const segmentUris = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
-      const next = lines[i + 1];
-      if (next && !next.startsWith("#")) variantUris.push(next);
-    } else if (lines[i].startsWith("#EXTINF")) {
-      const next = lines[i + 1];
-      if (next && !next.startsWith("#")) segmentUris.push(next);
-    }
-  }
-  return { variantUris, segmentUris };
-}
-
 async function checkSegment(url, headers) {
   const res = await fetchWithTimeout(url, { headers: { ...headers, Range: "bytes=0-65535" } });
   if (!res.ok && res.status !== 206) throw new Error(`HTTP ${res.status} en segmento`);
@@ -50,28 +30,15 @@ async function checkSegment(url, headers) {
   if (buf.byteLength === 0) throw new Error("segmento devolvió 0 bytes");
 }
 
-// Solo se verifica master + variant playlist (que liste segmentos). No se
-// baja el segmento: los segmentos siempre se sirven vía proxy local, que
-// corrige Referer/headers y strippea prefijos PNG falsos — un hit directo al
-// segmento da 403 falsos (animeav1, upnshare, megaplay).
+// Solo se verifica el master (200 + #EXTM3U). Ni variants ni segmentos se
+// bajan: todo se sirve vía proxy local, que corrige Referer/headers y
+// strippea prefijos PNG falsos — un hit directo da 403 falsos (animeav1,
+// upnshare, megaplay).
 async function verifyHls(fetchUrl, headers) {
   const masterRes = await fetchWithTimeout(fetchUrl, { headers });
   if (!masterRes.ok) throw new Error(`HTTP ${masterRes.status} en master`);
   const masterText = await masterRes.text();
   if (!masterText.includes("#EXTM3U")) throw new Error("respuesta no es un m3u8 válido");
-
-  const masterUrl = masterRes.url || fetchUrl;
-  let { variantUris, segmentUris } = parseM3u8(masterText);
-
-  if (segmentUris.length === 0 && variantUris.length > 0) {
-    const variantUrl = resolveUri(variantUris[0], masterUrl);
-    const variantRes = await fetchWithTimeout(variantUrl, { headers });
-    if (!variantRes.ok) throw new Error(`HTTP ${variantRes.status} en variant playlist`);
-    const variantText = await variantRes.text();
-    segmentUris = parseM3u8(variantText).segmentUris;
-  }
-
-  if (segmentUris.length === 0) throw new Error("sin segmentos en el playlist");
 }
 
 async function verifyOne(stream) {
