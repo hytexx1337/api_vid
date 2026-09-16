@@ -237,7 +237,10 @@ async function fetchStreamUrls(episodeId) {
   });
   const sources = [...html.matchAll(/<source\b[^>]*?src\s*=\s*["']([^"']+)["']/gi)]
     .map((m) => decodeEntities(m[1]).trim())
-    .filter((u) => /^https?:\/\//i.test(u));
+    .filter((u) => /^https?:\/\//i.test(u))
+    // Los sources con &error/&error2 son los fallbacks ct/ck del player —
+    // nodos muertos/degradados que no sirven el video.
+    .filter((u) => !/[&?]error\d*$/i.test(u));
   return [...new Set(sources)];
 }
 
