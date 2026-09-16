@@ -24,3 +24,5 @@ export { getCinejoyStream } from "./scraper-cinejoy.js";
 export { getVidcoreStream, getVidrkSubs } from "./scraper-vidcore.js";
 export { getVixsrcStream } from "./scraper-vixsrc.js";
 export { getReanimeStreams } from "./reanime.js";
+export { getAniwavesStreams } from "./scraper-aniwaves.js";
+export { getAnimeheavenStreams } from "./scraper-animeheaven.js";

@@ -38,6 +38,8 @@ import {
   getVideasyStream,
   getVixsrcStream,
   getReanimeStreams,
+  getAniwavesStreams,
+  getAnimeheavenStreams,
   WANTED_ASS_LANGS,
 } from "../providers/index.js";
 
@@ -57,7 +59,7 @@ const R2_AUTO_ARCHIVE_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
   "ENG-DUB": ["reanime", "megaplay", "anikoto", "megavid", "miruro"],
   "JAP-ES-HS": ["animeav1"],
-  "JAP-EN-HS": ["anikoto-hsub", "miruro"],
+  "JAP-EN-HS": ["anikoto-hsub", "aniwaves", "animeheaven", "miruro"],
 };
 
 // Devuelve TODOS los candidatos ordenados por prioridad de provider, para que
@@ -301,6 +303,15 @@ async function resolveAnimeData(anilistId, episode) {
     );
   };
 
+  // Los scrapers de hardsub hacen muchas requests externas (búsqueda, detalle,
+  // servers, extractores con PoW). Sin un techo, un provider lento/colgado
+  // retrasa la respuesta entera del endpoint.
+  const HARDSUB_TIMEOUT = 90_000;
+  const withScraperTimeout = (name, promise) => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout ${HARDSUB_TIMEOUT}ms`)), HARDSUB_TIMEOUT)),
+  ]);
+
   // Prewarm del verify: apenas cada provider resuelve, disparamos la
   // verificación de sus URLs upstream en background (queda cacheada bajo
   // verify:{url}). Así el filterPlayableStreams del final es casi todo
@@ -309,7 +320,7 @@ async function resolveAnimeData(anilistId, episode) {
   // puede verificar a través del proxy local.
   const pw = (s) => { try { prewarmVerify(s); } catch { /* nunca romper el flujo */ } };
 
-  const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult] = await Promise.allSettled([
+  const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult, aniwavesResult, animeheavenResult] = await Promise.allSettled([
     timed2("animeav1", getLatinoStream(anilistId, episode).then(v => {
       for (const s of v?.streams ?? []) pw({ url: s.cfUrl ?? s.url, type: "hls", originalProvider: s.provider ?? "animeav1" });
       return v;
@@ -338,6 +349,13 @@ async function resolveAnimeData(anilistId, episode) {
       return v;
     })),
     timed2("aniskip", anilistToMal(anilistId).then(malId => getAnimeSkip(malId, parseInt(episode)))),
+    // aniwaves: hardsub EN. NO se prewarmea: sus playlists m3u8 pueden venir
+    // ofuscados en decimal ASCII y el verify directo fallaría con "no es un
+    // m3u8 válido" — se verifica a través del proxy local en
+    // filterPlayableStreams (usa proxy_url).
+    timed2("aniwaves", (isProviderEnabled("aniwaves") ? withScraperTimeout("aniwaves", getAniwavesStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] }))),
+    // animeheaven: hardsub EN, mp4 directo — rápido (~1s), sin extractores.
+    timed2("animeheaven", (isProviderEnabled("animeheaven") ? withScraperTimeout("animeheaven", getAnimeheavenStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] }))),
   ]);
   lap("allSettled done");
 
@@ -351,6 +369,8 @@ async function resolveAnimeData(anilistId, episode) {
     ["cr-subs",    crSubsResult,    v => `${v?.length ?? 0} tracks`],
     ["miruro",     miruroResult,    v => `dub=${v?.dub?.length ?? 0} sub=${v?.sub?.length ?? 0}`],
     ["anikoto",    anikotoResult,   v => `sub=${v?.sub?.length ?? 0} dub=${v?.dub?.length ?? 0}`],
+    ["aniwaves",   aniwavesResult,  v => `sub=${v?.sub?.length ?? 0}`],
+    ["animeheaven", animeheavenResult, v => `sub=${v?.sub?.length ?? 0}`],
     ["aniskip",    aniskipResult,   v => (v ? "ok" : "null")],
   ].map(([name, r, fmt]) =>
     r.status === "fulfilled" ? `${name}✓(${fmt(r.value)})` : `${name}✗(${r.reason?.message ?? "?"})`
@@ -375,8 +395,12 @@ async function resolveAnimeData(anilistId, episode) {
   if (anikotoResult.status === "rejected") console.warn("[anime] anikoto ✗:", anikotoResult.reason?.message);
   const megavid = megavidResult.status === "fulfilled" ? megavidResult.value : null;
   if (megavidResult.status === "rejected") console.warn("[anime] megavid ✗:", megavidResult.reason?.message);
+  const aniwaves = aniwavesResult.status === "fulfilled" ? aniwavesResult.value : { sub: [] };
+  if (aniwavesResult.status === "rejected") console.warn("[anime] aniwaves ✗:", aniwavesResult.reason?.message);
+  const animeheaven = animeheavenResult.status === "fulfilled" ? animeheavenResult.value : { sub: [] };
+  if (animeheavenResult.status === "rejected") console.warn("[anime] animeheaven ✗:", animeheavenResult.reason?.message);
 
-  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniskip };
+  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniwaves, animeheaven, aniskip };
 }
 
 async function getReanimeCached(anilistId, episode, cacheKey) {
@@ -397,8 +421,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
 
-  // v10: reanime sub/dub fix + dedupe por proxy_url + reanime cache corto
-  const cacheKey = `streams:anime:v10:${anilistId}:${episode}`;
+  // v11: + aniwaves (hardsub EN, scraper propio)
+  const cacheKey = `streams:anime:v11:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v10:${anilistId}:${episode}`;
   let data = cacheGet(cacheKey);
   let reanimeData = cacheGet(reanimeCacheKey);
@@ -407,7 +431,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
   if (!data) {
     data = await resolveAnimeData(anilistId, episode);
-    const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length;
+    const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length || data.aniwaves?.sub?.length || data.animeheaven?.sub?.length;
     if (hasAny) cacheSet(cacheKey, data, STREAM_TTL);
     if (!reanimeData) reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
   } else if (!reanimeData) {
@@ -417,7 +441,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
   data.reanime = reanimeData;
 
-  const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniskip, reanime } = data;
+  const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniwaves, animeheaven, aniskip, reanime } = data;
   const tracks = await buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
 
   let streams = [];
@@ -568,6 +592,30 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       });
       // La URL ya viene proxiada por Miruro; la pasamos por nuestro proxy para evitar bloqueos directos
       s.proxy_url = `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(miruroStream.url)}&ref=${encodeURIComponent("https://www.miruro.tv/")}`;
+      streams.push(s);
+    }
+  }
+
+  // aniwaves: el "sub" del sitio es japonés con subs en inglés QUEMADOS — el
+  // "-hsub" en originalProvider hace que normalizeLang lo etiquete JAP-EN-HS
+  // (misma convención que anikoto-hsub). Sus playlists pueden venir ofuscados
+  // en decimal ASCII; /generic-stream los decodifica antes de reescribir (ver
+  // routes/proxy.js).
+  for (const [list, providerName] of [
+    [aniwaves?.sub ?? [], "aniwaves"],
+    [animeheaven?.sub ?? [], "animeheaven"],
+  ]) {
+    for (const src of list) {
+      const originalProvider = `${providerName}-hsub-${src.server}`;
+      const s = makeAnimeStream(proxyBase, src.url, "auto", "japanese", originalProvider, {
+        headers: src.referer ? { Referer: src.referer, Origin: src.referer.replace(/\/$/, ""), "User-Agent": HEADERS["User-Agent"] } : null,
+        skip: src.skip ?? null,
+      });
+      // animeheaven devuelve mp4 directo → /mp4-proxy (soporta Range);
+      // aniwaves devuelve hls → /generic-stream.
+      s.proxy_url = src.type === "mp4"
+        ? `${proxyBase}/mp4-proxy?url=${encodeURIComponent(src.url)}&headers=${encodeURIComponent(JSON.stringify(src.referer ? { Referer: src.referer } : {}))}`
+        : `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(src.url)}${src.referer ? `&ref=${encodeURIComponent(src.referer)}` : ""}`;
       streams.push(s);
     }
   }

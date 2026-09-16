@@ -232,6 +232,19 @@ function genericHeaders(referer) {
 function resolveGenericUrl(raw, baseUrl) {
   try { return new URL(raw).href; } catch { return new URL(raw, baseUrl).href; }
 }
+
+// Algunos CDNs (vmbox/vmcld de vidmoly, echovideo — los que usan
+// animenosub/aniwaves vía Anivexa) sirven el m3u8 ofuscado: cada línea es el
+// código ASCII decimal de un caracter ("35 69 88 84 77 51 85" = "#EXTM3U").
+// Se detecta porque el body son solo dígitos/espacios y decodifica a #EXTM3U.
+function decodeDecimalPlaylist(text) {
+  const trimmed = text.trim();
+  if (trimmed.startsWith("#EXTM3U")) return text;
+  if (!/^[0-9\s]+$/.test(trimmed)) return text;
+  const decoded = trimmed.split(/\s+/).map((n) => String.fromCharCode(Number(n))).join("");
+  return decoded.includes("#EXTM3U") ? decoded : text;
+}
+
 function rewriteGenericPlaylist(text, baseUrl, refEnc) {
   return text
     .split("\n")
@@ -242,7 +255,7 @@ function rewriteGenericPlaylist(text, baseUrl, refEnc) {
         const abs = resolveGenericUrl(trimmed, baseUrl);
         return `/generic-seg?u=${encodeURIComponent(abs)}${refEnc}`;
       }
-      if (trimmed.startsWith("#EXT-X-KEY") || trimmed.startsWith("#EXT-X-MAP") || trimmed.startsWith("#EXT-X-MEDIA")) {
+      if (trimmed.startsWith("#EXT-X-KEY") || trimmed.startsWith("#EXT-X-MAP") || trimmed.startsWith("#EXT-X-MEDIA") || trimmed.startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
         return trimmed.replace(/URI="([^"]+)"/g, (_, uri) => {
           const abs = resolveGenericUrl(uri, baseUrl);
           if (abs.includes("ultracloud.cc") || abs.includes("piltover.li")) return `URI="/aes-key?u=${encodeURIComponent(abs)}"`;
@@ -267,7 +280,7 @@ router.get("/generic-stream.m3u8", async (req, res) => {
       return res.status(502).json({ error: `generic upstream: ${r.status}` });
     }
     const refEnc = referer ? `&ref=${encodeURIComponent(referer)}` : "";
-    const master = await r.text();
+    const master = decodeDecimalPlaylist(await r.text());
     const isMaster = master.includes("#EXT-X-STREAM-INF");
     const isMedia = !isMaster && master.includes("#EXT-X-TARGETDURATION");
     if (isMedia) {
@@ -311,7 +324,7 @@ router.get("/generic-seg", async (req, res) => {
   const targetUrl = req.query.u ? decodeURIComponent(req.query.u) : null;
   if (!targetUrl) return res.status(400).json({ error: "Missing u param" });
   const referer = req.query.ref ? decodeURIComponent(req.query.ref) : null;
-  const isPlaylist = /\.m3u8(\?|$)/i.test(targetUrl.split("?")[0]);
+  const isPlaylistUrl = /\.m3u8(\?|$)/i.test(targetUrl.split("?")[0]);
   try {
     const r = await fetch(targetUrl, { headers: genericHeaders(referer), signal: AbortSignal.timeout(20000) });
     if (!r.ok) {
@@ -319,24 +332,51 @@ router.get("/generic-seg", async (req, res) => {
       return res.status(r.status).end();
     }
     const ct = r.headers.get("content-type") ?? "";
-    if (ct.includes("mpegurl") || ct.includes("x-mpegurl") || isPlaylist) {
-      const refEnc = referer ? `&ref=${encodeURIComponent(referer)}` : "";
-      const content = await r.text();
-      res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
-      setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
-      return res.send(rewriteGenericPlaylist(content, targetUrl, refEnc));
+    const reader = r.body.getReader();
+    const first = await reader.read();
+
+    // Sniff del primer chunk: echovideo (aniwaves) sirve las sub-playlists con
+    // content-type image/jpeg en paths /cdn/ sin extensión, y vmbox/vmcld las
+    // sirve ofuscadas en decimal ASCII — ni el ct ni la URL las delatan.
+    const headText = first.value ? new TextDecoder().decode(first.value.subarray(0, 4096)) : "";
+    const headTrim = headText.trim();
+    const looksPlaylist = headTrim.startsWith("#EXTM3U") || (/^[0-9\s]+$/.test(headTrim) && headTrim.length > 0);
+
+    const buffered = first.value ? [first.value] : [];
+    let bufferedLen = first.value?.byteLength ?? 0;
+    let streamDone = first.done ?? false;
+
+    if (looksPlaylist || ct.includes("mpegurl") || ct.includes("x-mpegurl") || isPlaylistUrl) {
+      // Los playlists son chicos; si pasa de 4MB no es un playlist → binario.
+      while (!streamDone && bufferedLen <= 4 * 1024 * 1024) {
+        const { done, value } = await reader.read();
+        if (done) { streamDone = true; break; }
+        buffered.push(value);
+        bufferedLen += value.byteLength;
+      }
+      if (streamDone) {
+        const refEnc = referer ? `&ref=${encodeURIComponent(referer)}` : "";
+        const content = decodeDecimalPlaylist(Buffer.concat(buffered.map((b) => Buffer.from(b))).toString("utf8"));
+        res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
+        setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
+        return res.send(rewriteGenericPlaylist(content, targetUrl, refEnc));
+      }
     }
+
     const isUltracloud = targetUrl.includes("ultracloud.cc") || targetUrl.includes("piltover.li");
     let forcedCt = isUltracloud ? "application/octet-stream" : "video/mp2t";
     res.setHeader("Content-Type", forcedCt);
     setCacheForResponse(res, forcedCt, targetUrl);
-    const reader = r.body.getReader();
     const pump = async () => {
-      while (true) {
+      for (const chunk of buffered) {
+        if (!res.write(Buffer.from(chunk))) await new Promise(ok => res.once("drain", ok));
+      }
+      while (!streamDone) {
         const { done, value } = await reader.read();
-        if (done) { res.end(); break; }
+        if (done) { streamDone = true; break; }
         if (!res.write(value)) await new Promise(ok => res.once("drain", ok));
       }
+      res.end();
     };
     pump().catch(() => { if (!res.headersSent) res.destroy(); });
   } catch (e) { if (!res.headersSent) res.status(500).json({ error: e.message }); }
