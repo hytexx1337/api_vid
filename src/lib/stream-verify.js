@@ -62,7 +62,7 @@ async function verifyOne(stream) {
 const pendingVerify = new Map();
 
 function verifyAndCache(stream) {
-  const cacheKey = `verify:${stream.url}`;
+  const cacheKey = `verify:${stream.verifyKey || stream.url}`;
   const p = verifyOne(stream)
     .then(ok => { cacheSet(cacheKey, ok, VERIFY_TTL_MS); return ok; })
     .catch(() => true) // error inesperado → no penalizar el stream
@@ -79,7 +79,7 @@ function verifyAndCache(stream) {
  */
 export function prewarmVerify(stream) {
   if (!stream?.url) return;
-  const cacheKey = `verify:${stream.url}`;
+  const cacheKey = `verify:${stream.verifyKey || stream.url}`;
   if (cacheGet(cacheKey) !== null && cacheGet(cacheKey) !== undefined) return;
   if (pendingVerify.has(cacheKey)) return;
   verifyAndCache(stream);
@@ -97,11 +97,11 @@ const VERIFY_BUDGET_MS = 2_500;
  * fallan (ej. un blip transitorio de red del propio VPS) devuelve la lista
  * original sin filtrar — mejor mostrar algo que un 404 falso.
  */
-export async function filterPlayableStreams(streams, { budgetMs = VERIFY_BUDGET_MS } = {}) {
+export async function filterPlayableStreams(streams, { budgetMs = VERIFY_BUDGET_MS, allowEmpty = false } = {}) {
   const deadline = Date.now() + budgetMs;
   let timedOut = 0;
   const results = await Promise.all(streams.map(async (s) => {
-    const cacheKey = `verify:${s.url}`;
+    const cacheKey = `verify:${s.verifyKey || s.url}`;
     const cached = cacheGet(cacheKey);
     if (cached !== null && cached !== undefined) return cached;
     const p = pendingVerify.get(cacheKey) ?? verifyAndCache(s);
@@ -119,5 +119,7 @@ export async function filterPlayableStreams(streams, { budgetMs = VERIFY_BUDGET_
   if (timedOut) {
     console.warn(`[verify] budget ${budgetMs}ms — ${timedOut} stream(s) sin verificar a tiempo (incluidos optimistas)`);
   }
-  return playable.length > 0 ? playable : streams;
+  // allowEmpty: el caller quiere saber si TODO falló (ej. zenkai → caer a
+  // scrapear) en vez del fallback optimista de devolver la lista original.
+  return (playable.length > 0 || allowEmpty) ? playable : streams;
 }

@@ -330,7 +330,7 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
 });
 
 // ── Anime endpoint ─────────────────────────────────────────────────────────────
-async function resolveAnimeData(anilistId, episode) {
+async function resolveAnimeData(anilistId, episode, skipProviders = new Set()) {
   const t0 = Date.now();
   const lap = (label) => console.log(`  [resolveAnime ${anilistId}/${episode}] ${label}: ${Date.now() - t0}ms`);
 
@@ -359,29 +359,33 @@ async function resolveAnimeData(anilistId, episode) {
   // puede verificar a través del proxy local.
   const pw = (s) => { try { prewarmVerify(s); } catch { /* nunca romper el flujo */ } };
 
+  // Providers salteados porque zenkai ya cubre sus langs: devuelven el
+  // empty shape que espera el build de abajo, sin scrapear.
+  const skip = (name) => skipProviders.has(name);
+
   const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult, aniwavesResult, animeheavenResult] = await Promise.allSettled([
-    timed2("animeav1", getLatinoStream(anilistId, episode).then(v => {
+    skip("animeav1") ? Promise.resolve(null) : timed2("animeav1", getLatinoStream(anilistId, episode).then(v => {
       for (const s of v?.streams ?? []) pw({ url: s.cfUrl ?? s.url, type: "hls", originalProvider: s.provider ?? "animeav1" });
       return v;
     })),
-    timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode)).then(v => {
+    skip("megaplay") ? Promise.resolve({ dub: null, sub: null }) : timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode)).then(v => {
       for (const it of [v?.dub, v?.sub]) if (it?.url) pw({ url: it.url, headers: it.headers, type: "hls", originalProvider: "megaplay" });
       return v;
     })),
-    timed2("megavid", (isProviderEnabled("megavid") ? getMegavidStream(anilistId, parseInt(episode)).then(v => {
+    skip("megavid") ? Promise.resolve(null) : timed2("megavid", (isProviderEnabled("megavid") ? getMegavidStream(anilistId, parseInt(episode)).then(v => {
       if (v?.url) pw({ url: v.url, headers: { Referer: "https://megavid.buzz/" }, type: "hls", originalProvider: "megavid" });
       return v;
     }) : Promise.resolve(null))),
-    timed2("cuevana", getCuevanaAnime(anilistId, parseInt(episode)).then(v => {
+    skip("cuevana") ? Promise.resolve([]) : timed2("cuevana", getCuevanaAnime(anilistId, parseInt(episode)).then(v => {
       for (const c of v ?? []) if (c?.url) pw({ url: c.url, headers: c.headers, type: c.url.includes(".mp4") ? "mp4" : "hls", originalProvider: "embed69" });
       return v;
     })),
     timed2("cr-subs", getCRSubsForAnime(anilistId, parseInt(episode))),
-    timed2("miruro", (isProviderEnabled("miruro") ? getMiruroStreams(anilistId, parseInt(episode)) : Promise.resolve({ dub: [], sub: [] })).then(v => {
+    skip("miruro") ? Promise.resolve({ dub: [], sub: [] }) : timed2("miruro", (isProviderEnabled("miruro") ? getMiruroStreams(anilistId, parseInt(episode)) : Promise.resolve({ dub: [], sub: [] })).then(v => {
       for (const s of [...(v?.dub ?? []), ...(v?.sub ?? [])]) if (s?.url) pw({ url: s.url, headers: s.headers, type: "hls", originalProvider: `miruro-${s.provider}` });
       return v;
     })),
-    timed2("anikoto", getAnikotoStreams(anilistId, parseInt(episode)).then(v => {
+    skip("anikoto") ? Promise.resolve({ sub: [], dub: [], hsub: [] }) : timed2("anikoto", getAnikotoStreams(anilistId, parseInt(episode)).then(v => {
       for (const s of [...(v?.sub ?? []), ...(v?.dub ?? []), ...(v?.hsub ?? [])]) {
         if (s?.url && (s.type === "hls" || s.url.includes(".m3u8"))) pw({ url: s.url, headers: { Referer: s.referer }, type: "hls", originalProvider: `anikoto-${s.server}` });
       }
@@ -392,9 +396,9 @@ async function resolveAnimeData(anilistId, episode) {
     // ofuscados en decimal ASCII y el verify directo fallaría con "no es un
     // m3u8 válido" — se verifica a través del proxy local en
     // filterPlayableStreams (usa proxy_url).
-    timed2("aniwaves", (isProviderEnabled("aniwaves") ? withScraperTimeout("aniwaves", getAniwavesStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] }))),
+    skip("aniwaves") ? Promise.resolve({ sub: [] }) : timed2("aniwaves", (isProviderEnabled("aniwaves") ? withScraperTimeout("aniwaves", getAniwavesStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] }))),
     // animeheaven: hardsub EN, mp4 directo — rápido (~1s), sin extractores.
-    timed2("animeheaven", (isProviderEnabled("animeheaven") ? withScraperTimeout("animeheaven", getAnimeheavenStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] }))),
+    skip("animeheaven") ? Promise.resolve({ sub: [] }) : timed2("animeheaven", (isProviderEnabled("animeheaven") ? withScraperTimeout("animeheaven", getAnimeheavenStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] }))),
   ]);
   lap("allSettled done");
 
@@ -412,6 +416,7 @@ async function resolveAnimeData(anilistId, episode) {
     ["animeheaven", animeheavenResult, v => `sub=${v?.sub?.length ?? 0}`],
     ["aniskip",    aniskipResult,   v => (v ? "ok" : "null")],
   ].map(([name, r, fmt]) =>
+    skipProviders.has(name) ? `${name}⊘zenkai` :
     r.status === "fulfilled" ? `${name}✓(${fmt(r.value)})` : `${name}✗(${r.reason?.message ?? "?"})`
   ).join(" ");
   console.log(`  [resolveAnime] providers: ${providerSummary}`);
@@ -456,6 +461,64 @@ async function getReanimeCached(anilistId, episode, cacheKey) {
   }
 }
 
+const R2_LANG_LABELS = {
+  "ESP-LAT": "Español latino",
+  "ENG-DUB": "Inglés (doblado)",
+  "JAP-SUB": "Japonés (sub por separado)",
+  "JAP-ES-HS": "Japonés (sub español quemado)",
+  "JAP-EN-HS": "Japonés (sub inglés quemado)",
+};
+
+// Streams archivados en R2 (bucket propio, ver scripts/r2-select.js). Van
+// primero en el array para quedar como "CPT CDN 1" de su idioma: no dependen
+// de que el provider original siga vivo. verifyKey estable por slug — la URL
+// firmada rota (exp en la firma) y sin esto el verify cache nunca pegaría.
+function buildZenkaiStreams(r2Archived) {
+  const out = [];
+  for (const [lang, entry] of Object.entries(r2Archived)) {
+    try {
+      const signedUrl = buildSignedR2Url(`${entry.slug}/master.m3u8`);
+      // Mismo formato `skip` que usan los demás providers (ver makeAnimeStream):
+      // { intro: [start,end], outro: [start,end] } en segundos.
+      const skip = (entry.skipIntro || entry.skipOutro)
+        ? { ...(entry.skipIntro && { intro: entry.skipIntro }), ...(entry.skipOutro && { outro: entry.skipOutro }) }
+        : null;
+      out.push({
+        url: signedUrl,
+        quality: "auto",
+        lang,
+        langLabel: R2_LANG_LABELS[lang] || lang,
+        type: "hls",
+        provider: "zenkai",
+        originalProvider: "zenkai",
+        sourceProvider: entry.sourceProvider,
+        proxy_url: signedUrl,
+        verifyKey: `r2:${entry.slug}`,
+        ...(skip && { skip }),
+      });
+    } catch (e) {
+      console.warn(`[anime] r2 archive ${lang} sin firmar: ${e.message}`);
+    }
+  }
+  return out;
+}
+
+// Langs normalizados que cada provider puede producir (ver normalizeLang).
+// Si TODOS los langs de un provider están cubiertos por zenkai verificado,
+// el provider no se scrapea. JAP-SUB nunca está archivado → megaplay,
+// anikoto y reanime corren siempre.
+const PROVIDER_LANGS = {
+  animeav1: ["ESP-LAT", "JAP-ES-HS"],
+  megaplay: ["ENG-DUB", "JAP-SUB"],
+  megavid: ["ENG-DUB"],
+  cuevana: ["ESP-LAT"],
+  miruro: ["ENG-DUB", "JAP-EN-HS"],
+  anikoto: ["ENG-DUB", "JAP-SUB", "JAP-EN-HS"],
+  aniwaves: ["JAP-EN-HS"],
+  animeheaven: ["JAP-EN-HS"],
+  reanime: ["JAP-SUB", "ENG-DUB"],
+};
+
 router.get("/anime/:anilistId/:episode", async (req, res) => {
   const { anilistId, episode } = req.params;
   const proxyBase = getProxyBase(req);
@@ -466,8 +529,33 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const respKey = `resp:${cacheKey}:${proxyBase}`;
   const cachedBody = cacheGet(respKey);
   if (cachedBody) return res.type("application/json").send(cachedBody);
+
+  // Zenkai (R2 archive) por lang: los streams archivados que pasan verify
+  // cubren su lang — los providers que solo sirven langs cubiertos no se
+  // scrapean. JAP-SUB nunca se archiva → sus providers corren siempre.
+  // Si un zenkai falla verify, su lang queda descubierto y vuelve a scrapear.
+  const r2Archived = getR2Archive(anilistId, episode);
+  const coveredLangs = new Set();
+  if (Object.keys(r2Archived).length) {
+    const zenkaiStreams = buildZenkaiStreams(r2Archived);
+    if (zenkaiStreams.length) {
+      const ok = await filterPlayableStreams(zenkaiStreams, { allowEmpty: true });
+      for (const s of ok) coveredLangs.add(s.lang);
+    } else {
+      console.warn(`[anime] zenkai ${anilistId}/${episode}: archivado pero sin URLs firmadas (falta R2_SEAL_SECRET/R2_WORKER_BASE)`);
+    }
+  }
+  const skipProviders = new Set(
+    Object.entries(PROVIDER_LANGS)
+      .filter(([, langs]) => langs.every((l) => coveredLangs.has(l)))
+      .map(([name]) => name)
+  );
+  if (skipProviders.size) {
+    console.log(`[anime] zenkai cubre ${[...coveredLangs].join(",")} — skip: ${[...skipProviders].join(",")}`);
+  }
+
   let data = cacheGet(cacheKey);
-  let reanimeData = cacheGet(reanimeCacheKey);
+  let reanimeData = skipProviders.has("reanime") ? null : cacheGet(reanimeCacheKey);
   if (data) console.log(`[anime] ${anilistId}/${episode} servido desde cache (providers no corrieron)`);
   if (reanimeData) console.log(`[anime] ${anilistId}/${episode} reanime servido desde cache`);
 
@@ -475,13 +563,16 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     data = await coalesce(cacheKey, async () => {
       const hit = cacheGet(cacheKey);
       if (hit) return hit;
-      const d = await resolveAnimeData(anilistId, episode);
+      const d = await resolveAnimeData(anilistId, episode, skipProviders);
       const hasAny = d.megaplayDub || d.megaplaySub || d.megavid || d.latino || d.cuevanaStreams?.length || d.anikoto?.sub?.length || d.anikoto?.dub?.length || d.anikoto?.hsub?.length || d.aniwaves?.sub?.length || d.animeheaven?.sub?.length;
-      if (hasAny) cacheSet(cacheKey, d, STREAM_TTL);
+      // Scrape parcial (providers salteados por zenkai) NO se persiste: si
+      // un zenkai muere, el próximo build lo detecta por verify y re-scrapea
+      // los providers de ese lang en vez de servir data incompleta cacheada.
+      if (hasAny && !skipProviders.size) cacheSet(cacheKey, d, STREAM_TTL);
       return d;
     });
-    if (!reanimeData) reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
-  } else if (!reanimeData) {
+    if (!reanimeData && !skipProviders.has("reanime")) reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
+  } else if (!reanimeData && !skipProviders.has("reanime")) {
     reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
     cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
   }
@@ -496,38 +587,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   // Streams archivados en R2 (bucket propio, ver scripts/r2-select.js).
   // Van primero en el array para quedar como "CPT CDN 1" de su idioma: no
   // dependen de que el provider original siga vivo, no hace falta re-scrapear.
-  const R2_LANG_LABELS = {
-    "ESP-LAT": "Español latino",
-    "ENG-DUB": "Inglés (doblado)",
-    "JAP-SUB": "Japonés (sub por separado)",
-    "JAP-ES-HS": "Japonés (sub español quemado)",
-    "JAP-EN-HS": "Japonés (sub inglés quemado)",
-  };
-  const r2Archived = getR2Archive(anilistId, episode);
-  for (const [lang, entry] of Object.entries(r2Archived)) {
-    try {
-      const signedUrl = buildSignedR2Url(`${entry.slug}/master.m3u8`);
-      // Mismo formato `skip` que usan los demás providers (ver makeAnimeStream):
-      // { intro: [start,end], outro: [start,end] } en segundos.
-      const skip = (entry.skipIntro || entry.skipOutro)
-        ? { ...(entry.skipIntro && { intro: entry.skipIntro }), ...(entry.skipOutro && { outro: entry.skipOutro }) }
-        : null;
-      streams.push({
-        url: signedUrl,
-        quality: "auto",
-        lang,
-        langLabel: R2_LANG_LABELS[lang] || lang,
-        type: "hls",
-        provider: "zenkai",
-        originalProvider: "zenkai",
-        sourceProvider: entry.sourceProvider,
-        proxy_url: signedUrl,
-        ...(skip && { skip }),
-      });
-    } catch (e) {
-      console.warn(`[anime] r2 archive ${lang} sin firmar: ${e.message}`);
-    }
-  }
+  streams.push(...buildZenkaiStreams(r2Archived));
 
   const downloads = [];
 
@@ -695,6 +755,12 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   // y se diferencian en la query ?audio= del proxy.
   const seenUrls = new Set();
   streams = streams.filter((s) => { const key = s.proxy_url || s.url; if (seenUrls.has(key)) return false; seenUrls.add(key); return true; });
+
+  // Langs cubiertos por zenkai: usar SOLO el stream archivado — los de
+  // providers (si vinieron de cache de un scrape completo anterior) salen.
+  if (coveredLangs.size) {
+    streams = streams.filter((s) => s.originalProvider === "zenkai" || !coveredLangs.has(s.lang));
+  }
 
   if (streams.length === 0) return res.status(404).json({ error: "No streams found for this episode" });
 
