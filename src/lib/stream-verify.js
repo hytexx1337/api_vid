@@ -85,24 +85,39 @@ export function prewarmVerify(stream) {
   verifyAndCache(stream);
 }
 
+// Presupuesto total para verificar en el build de la respuesta: un stream
+// colgado (ni 200 ni 403, conexión estancada) bloqueaba hasta el timeout de
+// 6s. Si no resuelve a tiempo entra optimista — el player cae al siguiente
+// si está muerto — y el verify sigue en background cacheando para el
+// próximo build.
+const VERIFY_BUDGET_MS = 2_500;
+
 /**
  * Filtra streams no reproducibles verificando todos en paralelo. Si TODOS
  * fallan (ej. un blip transitorio de red del propio VPS) devuelve la lista
  * original sin filtrar — mejor mostrar algo que un 404 falso.
  */
-export async function filterPlayableStreams(streams) {
+export async function filterPlayableStreams(streams, { budgetMs = VERIFY_BUDGET_MS } = {}) {
+  const deadline = Date.now() + budgetMs;
+  let timedOut = 0;
   const results = await Promise.all(streams.map(async (s) => {
     const cacheKey = `verify:${s.url}`;
-    let ok = cacheGet(cacheKey);
-    if (ok === null || ok === undefined) {
-      ok = pendingVerify.has(cacheKey) ? await pendingVerify.get(cacheKey) : await verifyAndCache(s);
-    }
-    return ok;
+    const cached = cacheGet(cacheKey);
+    if (cached !== null && cached !== undefined) return cached;
+    const p = pendingVerify.get(cacheKey) ?? verifyAndCache(s);
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) { timedOut++; return true; }
+    const r = await Promise.race([p, new Promise((res) => setTimeout(() => res("__timeout__"), remaining))]);
+    if (r === "__timeout__") { timedOut++; return true; }
+    return r;
   }));
   const playable = streams.filter((_, i) => results[i]);
   const dropped = streams.filter((_, i) => !results[i]);
   if (dropped.length) {
     console.warn(`[verify] filtrados ${dropped.length}/${streams.length}: ${dropped.map(s => s.originalProvider || s.provider || "?").join(", ")}`);
+  }
+  if (timedOut) {
+    console.warn(`[verify] budget ${budgetMs}ms — ${timedOut} stream(s) sin verificar a tiempo (incluidos optimistas)`);
   }
   return playable.length > 0 ? playable : streams;
 }

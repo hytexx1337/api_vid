@@ -259,8 +259,7 @@ async function resolveSeries(anilistId, lap = () => {}) {
   const media = await getAnimeMedia(anilistId);
   const titles = buildTitles(media);
   const expected = expectedCount(media);
-  const offset = await getPrequelOffset(anilistId).catch(() => 0);
-  lap(`anilist media (expected=${expected}, offset=${offset})`);
+  lap(`anizip media (expected=${expected})`);
 
   // Variantes de los primeros 3 títulos, cap 10 queries en paralelo.
   const queries = [...new Set(titles.slice(0, 3).flatMap(titleVariants))].slice(0, 10);
@@ -281,16 +280,21 @@ async function resolveSeries(anilistId, lap = () => {}) {
     .slice(0, 5);
   if (!candidates.length) throw new Error(`AnimeHeaven: no match for AniList ${anilistId}`);
 
-  const selected = await selectSeries(
-    candidates,
-    // Un candidato sin episodios (entrada vacía/película sin listar) se
-    // descarta — si fetchEpisodes tira, Promise.all rechazaría todo.
-    async (id) => fetchEpisodes(id).catch(() => []),
-    expected,
-    media.status,
-    offset,
-    { minScore: 0.5 },
-  );
+  // Un candidato sin episodios (entrada vacía/película sin listar) se
+  // descarta — si fetchEpisodes tira, Promise.all rechazaría todo.
+  const scrapeFn = async (id) => fetchEpisodes(id).catch(() => []);
+  let offset = 0;
+  let selected = await selectSeries(candidates, scrapeFn, expected, media.status, 0, { minScore: 0.5 });
+  // Fallback lazy: solo si el match local falla se consulta el offset de
+  // precuelas a AniList (sitios que numeran continuo entre temporadas) —
+  // el path común no toca graphql.anilist.co.
+  if (!selected) {
+    offset = await getPrequelOffset(anilistId).catch(() => 0);
+    if (offset) {
+      lap(`sin match local — reintento con offset=${offset}`);
+      selected = await selectSeries(candidates, scrapeFn, expected, media.status, offset, { minScore: 0.5 });
+    }
+  }
   if (!selected) throw new Error(`AnimeHeaven: no confident match for AniList ${anilistId}`);
   lap(`match → ${selected.slug} "${selected.title}" mode=${selected.mode} eps=${selected.episodes.length}`);
 

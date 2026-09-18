@@ -73,6 +73,10 @@ export async function verifyAnimeCache({ maxUrlsPerEntry = 12 } = {}) {
 }
 
 export function scheduleAnimeVerifier({ intervalMs = 24 * 60 * 60 * 1000, initialDelayMs = 2 * 60 * 1000 } = {}) {
+  // En cluster (pm2 -i max) cada worker es un proceso distinto — el job
+  // periódico corre solo en la instancia 0 para no multiplicar el verify.
+  const inst = process.env.NODE_APP_INSTANCE;
+  if (inst !== undefined && inst !== "0") return;
   setTimeout(() => {
     verifyAnimeCache().catch((e) => console.warn("[verifier] error:", e.message));
     setInterval(() => {

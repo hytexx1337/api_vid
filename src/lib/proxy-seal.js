@@ -4,12 +4,15 @@ const ALGO = "aes-256-gcm";
 const IV_LEN = 16;
 const TAG_LEN = 16;
 
+let _key = null;
 function getKey() {
+  if (_key) return _key;
   const secret = process.env.PROXY_SEAL_SECRET;
   if (!secret) {
     throw new Error("PROXY_SEAL_SECRET no está configurado");
   }
-  return crypto.createHash("sha256").update(secret).digest();
+  _key = crypto.createHash("sha256").update(secret).digest();
+  return _key;
 }
 
 function base64url(buf) {

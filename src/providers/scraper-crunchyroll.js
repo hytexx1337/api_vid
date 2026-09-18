@@ -775,7 +775,32 @@ async function getCRMovieSubtitles(anilistId, titleRomaji, titleEnglish) {
  * @param {number} episode
  * @returns {Promise<Array<{label, lang, url, format, _localFile}>>}
  */
-export async function getCRSubsForAnime(anilistId, episode) {
+// Dedup de resoluciones en vuelo: N requests concurrentes al mismo episodio
+// awaitan la misma promesa — sin esto, un episodio sin subs indexadas
+// disparaba N consultas paralelas a CR (índice vacío → re-fetch por request).
+const crInflight = new Map();
+
+export function getCRSubsForAnime(anilistId, episode) {
+  const key = `${anilistId}:${episode}`;
+  let p = crInflight.get(key);
+  if (!p) {
+    p = resolveCRSubs(anilistId, episode)
+      .catch((e) => {
+        // Ep sin subs en CR: cachear vacío 10min — el rechazo no persistía
+        // y cada request re-consultaba CR (índice vacío → re-fetch).
+        if (/no encontrado/i.test(e?.message ?? "")) {
+          cacheSet(`cr:vtt:${key}`, [], 10 * 60 * 1000);
+          return [];
+        }
+        throw e;
+      })
+      .finally(() => crInflight.delete(key));
+    crInflight.set(key, p);
+  }
+  return p;
+}
+
+async function resolveCRSubs(anilistId, episode) {
   const idxKey  = `${anilistId}:${episode}`;
   const memKey  = `cr:vtt:${anilistId}:${episode}`;
 

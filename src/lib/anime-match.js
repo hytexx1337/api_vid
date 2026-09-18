@@ -1,9 +1,9 @@
-// Utilidades compartidas por los scrapers de hardsub inglés (animenosub,
-// aniwaves): fetch de AniList, matching de títulos por dice-coefficient,
-// selección de serie por cobertura de episodios y offset de precuelas.
+// Utilidades compartidas por los scrapers de hardsub inglés (animeheaven,
+// aniwaves): metadata vía api.ani.zip (AniList GraphQL daba 429 seguido —
+// solo queda para getPrequelOffset como fallback lazy), matching de títulos
+// por dice-coefficient y selección de serie por cobertura de episodios.
 // Portado de Anivexa-API (core/new-provider-utils.js + core/anilist.js),
-// adaptado a la cache de api_vid (cacheGet/cacheSet) y sin dependencia de
-// anizip (api_vid no la usa).
+// adaptado a la cache de api_vid (cacheGet/cacheSet).
 import { cacheGet, cacheSet } from "./cache.js";
 import { ANILIST_HEADERS } from "../config/constants.js";
 
@@ -143,19 +143,64 @@ async function anilistQuery(query, variables) {
   return json.data;
 }
 
-// Media de AniList con los campos que necesitan los scrapers de hardsub
-// (títulos/synonyms para buscar, status/format/year/episodes para validar el
-// match). Cache propia para no pisar TTLs de metadata/anilist.js.
+// Metadata vía api.ani.zip/mappings — una request cacheada 24h de la que se
+// deriva la misma shape de Media que consumían los scrapers
+// (title{romaji,english,native}, synonyms, format, status, episodes, idMal).
+async function fetchAniZip(anilistId) {
+  const cacheKey = `anizip:mappings:${anilistId}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) return cached;
+  const res = await fetch(`https://api.ani.zip/mappings?anilist_id=${anilistId}`, {
+    headers: { "User-Agent": HARDSUB_UA, Accept: "application/json" },
+    signal: AbortSignal.timeout(8000),
+  });
+  if (!res.ok) throw new Error(`ani.zip HTTP ${res.status}`);
+  const json = await res.json();
+  if (!json?.titles && !json?.mappings) throw new Error(`ani.zip: no data for ${anilistId}`);
+  cacheSet(cacheKey, json, SERIES_TTL);
+  return json;
+}
+
+// ani.zip no trae status — se infiere del airDate del último ep numerado:
+// si salió hace >60d se asume FINISHED (habilita el corte duro de
+// selectSeries); al aire / reciente / sin data → RELEASING (sin corte: el
+// sitio legítimamente tiene menos eps que los planeados).
+function inferStatus(episodes) {
+  const lastAir = Object.entries(episodes ?? {})
+    .filter(([k]) => /^\d+$/.test(k))
+    .map(([, e]) => e.airDate ?? e.airdate)
+    .filter(Boolean)
+    .sort()
+    .at(-1);
+  if (!lastAir) return "RELEASING";
+  const cutoff = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  return lastAir > cutoff ? "RELEASING" : "FINISHED";
+}
+
 export async function getAnimeMedia(anilistId) {
   const cacheKey = `hardsub:al-media:${anilistId}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
-  const data = await anilistQuery(
-    `query($id:Int){Media(id:$id,type:ANIME){id idMal title{english romaji native} status format episodes seasonYear startDate{year} synonyms}}`,
-    { id: Number(anilistId) }
-  );
-  const media = data?.Media;
-  if (!media) throw new Error(`AniList: no media for ${anilistId}`);
+  const j = await fetchAniZip(anilistId);
+  const epCount = j.episodeCount ?? Object.keys(j.episodes ?? {}).filter((k) => /^\d+$/.test(k)).length;
+  const year = j.episodes?.["1"]?.airDate?.slice(0, 4) ?? null;
+  const media = {
+    id: Number(anilistId),
+    idMal: j.mappings?.mal_id ?? null,
+    title: {
+      romaji: j.titles?.["x-jat"] ?? null,
+      english: j.titles?.en ?? null,
+      native: j.titles?.ja ?? null,
+    },
+    // ani.zip no tiene synonyms — los títulos en otros idiomas quedan como
+    // variantes extra de búsqueda.
+    synonyms: [j.titles?.de, j.titles?.["zh-Hans"], j.titles?.["zh-Hant"]].filter(Boolean),
+    status: inferStatus(j.episodes),
+    format: j.mappings?.type ? String(j.mappings.type).toUpperCase() : null,
+    episodes: epCount || null,
+    seasonYear: year ? Number(year) : null,
+    startDate: { year: year ? Number(year) : null },
+  };
   cacheSet(cacheKey, media, SERIES_TTL);
   return media;
 }

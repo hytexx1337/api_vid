@@ -48,6 +48,25 @@ const router = Router();
 // Rate limit para endpoints JSON: 60 req/min por IP.
 router.use(createRateLimiter({ windowMs: 60_000, max: 60, message: "Too many stream requests" }));
 
+// Coalescing de resoluciones en vuelo: N requests concurrentes al mismo
+// cacheKey awaitan la misma promesa en vez de disparar N scrapeos paralelos
+// (un episodio recién emitido popular = stampede contra los providers).
+const inflight = new Map();
+function coalesce(key, fn) {
+  let p = inflight.get(key);
+  if (!p) {
+    p = Promise.resolve().then(fn).finally(() => inflight.delete(key));
+    inflight.set(key, p);
+  }
+  return p;
+}
+
+// Respuesta final sellada+serializada por (cacheKey, proxyBase): absorbe
+// ráfagas sobre el mismo recurso salteando build de streams + verify filter
+// + seal AES + stringify. 60s — el verify cachea 5min así que no se congela
+// nada que no estuviera ya congelado. Prefijo "resp:" → solo memoria.
+const RESP_TTL = 60_000;
+
 function handleError(res, err) {
   const status = err.status ?? 502;
   res.status(status).json({ error: err.message });
@@ -203,9 +222,16 @@ router.get("/movie/:tmdbId", async (req, res) => {
   const { tmdbId } = req.params;
   try {
     const cacheKey = `streams:movie:${tmdbId}`;
+    const proxyBase = getProxyBase(req);
+    const respKey = `resp:${cacheKey}:${proxyBase}`;
+    const cachedBody = cacheGet(respKey);
+    if (cachedBody) return res.type("application/json").send(cachedBody);
     let data = cacheGet(cacheKey);
 
     if (!data) {
+      data = await coalesce(cacheKey, async () => {
+        const hit = cacheGet(cacheKey);
+        if (hit) return hit;
       const tmdbMetaPromise = timed("movie/tmdbMeta", () => fetchTmdbMeta(tmdbId, "movie")).catch(e => { console.warn("[movie] tmdbMeta:", e.message); return null; });
       const othersPromise = Promise.all([
         isProviderEnabled("vaplayer") ? timed("movie/vaplayer", () => getVaplayerStream(tmdbId, "movie")).catch(e => { console.warn("[movie] vaplayer:", e.message); return null; }) : Promise.resolve(null),
@@ -219,12 +245,13 @@ router.get("/movie/:tmdbId", async (req, res) => {
         isProviderEnabled("vixsrc") ? timed("movie/vixsrc", () => getVixsrcStream(tmdbId, "movie")).catch(e => { console.warn("[movie] vixsrc:", e.message); return null; }) : Promise.resolve(null),
       ]);
       const [[vaplayerResult, vidupResult], [cuevanaStreams, cinejoyResult, videasyResult, vixsrcResult]] = await Promise.all([othersPromise, dependentPromise]);
-      data = { tmdbMeta, cuevanaStreams, cinejoy: cinejoyResult, vaplayer: vaplayerResult, vidup: vidupResult, videasy: videasyResult, vixsrc: vixsrcResult };
-      cacheSet(cacheKey, data, STREAM_TTL);
+      const d = { tmdbMeta, cuevanaStreams, cinejoy: cinejoyResult, vaplayer: vaplayerResult, vidup: vidupResult, videasy: videasyResult, vixsrc: vixsrcResult };
+      cacheSet(cacheKey, d, STREAM_TTL);
+      return d;
+      });
     }
 
     const { tmdbMeta, cuevanaStreams, cinejoy, vaplayer, vidup, videasy, vixsrc } = data;
-    const proxyBase = getProxyBase(req);
     const originalLang = tmdbMeta?.lang ?? "en";
 
     const tracks = await buildMovieTvTracks(tmdbId, "movie", 1, 1, proxyBase);
@@ -239,7 +266,9 @@ router.get("/movie/:tmdbId", async (req, res) => {
     const sorted = sortStreams(streams);
     const withDisplay = assignDisplayProviders(sorted);
     const response = { streams: withDisplay, tracks, meta: tmdbMeta ? { title: tmdbMeta.title, year: tmdbMeta.year, originalLang } : null };
-    res.json(sealProxyUrls(response, proxyBase));
+    const body = JSON.stringify(sealProxyUrls(response, proxyBase));
+    cacheSet(respKey, body, RESP_TTL);
+    res.type("application/json").send(body);
   } catch (err) { handleError(res, err); }
 });
 
@@ -248,9 +277,16 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
   const { tmdbId, season, episode } = req.params;
   try {
     const cacheKey = `streams:tv:${tmdbId}:${season}:${episode}`;
+    const proxyBase = getProxyBase(req);
+    const respKey = `resp:${cacheKey}:${proxyBase}`;
+    const cachedBody = cacheGet(respKey);
+    if (cachedBody) return res.type("application/json").send(cachedBody);
     let data = cacheGet(cacheKey);
 
     if (!data) {
+      data = await coalesce(cacheKey, async () => {
+        const hit = cacheGet(cacheKey);
+        if (hit) return hit;
       const tmdbMetaPromise = timed("tv/tmdbMeta", () => fetchTmdbMeta(tmdbId, "tv")).catch(e => { console.warn("[tv] tmdbMeta:", e.message); return null; });
       const othersPromise = Promise.all([
         isProviderEnabled("vaplayer") ? timed("tv/vaplayer", () => getVaplayerStream(tmdbId, "tv", +season, +episode)).catch(e => { console.warn("[tv] vaplayer:", e.message); return null; }) : Promise.resolve(null),
@@ -265,12 +301,13 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
         isProviderEnabled("vixsrc") ? timed("tv/vixsrc", () => getVixsrcStream(tmdbId, "tv", +season, +episode)).catch(e => { console.warn("[tv] vixsrc:", e.message); return null; }) : Promise.resolve(null),
       ]);
       const [[vaplayerResult, vidupResult], [cuevanaStreams, skipData, cinejoyResult, videasyResult, vixsrcResult]] = await Promise.all([othersPromise, dependentPromise]);
-      data = { tmdbMeta, cuevanaStreams, cinejoy: cinejoyResult, skip: skipData, vaplayer: vaplayerResult, vidup: vidupResult, videasy: videasyResult, vixsrc: vixsrcResult };
-      cacheSet(cacheKey, data, STREAM_TTL);
+      const d = { tmdbMeta, cuevanaStreams, cinejoy: cinejoyResult, skip: skipData, vaplayer: vaplayerResult, vidup: vidupResult, videasy: videasyResult, vixsrc: vixsrcResult };
+      cacheSet(cacheKey, d, STREAM_TTL);
+      return d;
+      });
     }
 
     const { tmdbMeta, cuevanaStreams, cinejoy, skip, vaplayer, vidup, videasy, vixsrc } = data;
-    const proxyBase = getProxyBase(req);
     const originalLang = tmdbMeta?.lang ?? "en";
 
     const tracks = await buildMovieTvTracks(tmdbId, "tv", +season, +episode, proxyBase);
@@ -286,7 +323,9 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
     const sorted = sortStreams(streams);
     const withDisplay = assignDisplayProviders(sorted);
     const response = { streams: withDisplay, tracks, skip: skip || null, meta: tmdbMeta ? { title: tmdbMeta.title, year: tmdbMeta.year, originalLang } : null };
-    res.json(sealProxyUrls(response, proxyBase));
+    const body = JSON.stringify(sealProxyUrls(response, proxyBase));
+    cacheSet(respKey, body, RESP_TTL);
+    res.type("application/json").send(body);
   } catch (err) { handleError(res, err); }
 });
 
@@ -424,15 +463,23 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   // v11: + aniwaves (hardsub EN, scraper propio)
   const cacheKey = `streams:anime:v11:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v10:${anilistId}:${episode}`;
+  const respKey = `resp:${cacheKey}:${proxyBase}`;
+  const cachedBody = cacheGet(respKey);
+  if (cachedBody) return res.type("application/json").send(cachedBody);
   let data = cacheGet(cacheKey);
   let reanimeData = cacheGet(reanimeCacheKey);
   if (data) console.log(`[anime] ${anilistId}/${episode} servido desde cache (providers no corrieron)`);
   if (reanimeData) console.log(`[anime] ${anilistId}/${episode} reanime servido desde cache`);
 
   if (!data) {
-    data = await resolveAnimeData(anilistId, episode);
-    const hasAny = data.megaplayDub || data.megaplaySub || data.megavid || data.latino || data.cuevanaStreams?.length || data.anikoto?.sub?.length || data.anikoto?.dub?.length || data.anikoto?.hsub?.length || data.aniwaves?.sub?.length || data.animeheaven?.sub?.length;
-    if (hasAny) cacheSet(cacheKey, data, STREAM_TTL);
+    data = await coalesce(cacheKey, async () => {
+      const hit = cacheGet(cacheKey);
+      if (hit) return hit;
+      const d = await resolveAnimeData(anilistId, episode);
+      const hasAny = d.megaplayDub || d.megaplaySub || d.megavid || d.latino || d.cuevanaStreams?.length || d.anikoto?.sub?.length || d.anikoto?.dub?.length || d.anikoto?.hsub?.length || d.aniwaves?.sub?.length || d.animeheaven?.sub?.length;
+      if (hasAny) cacheSet(cacheKey, d, STREAM_TTL);
+      return d;
+    });
     if (!reanimeData) reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
   } else if (!reanimeData) {
     reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
@@ -683,7 +730,9 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const grouped = [...sorted.filter(s => isDubLang(s.lang)), ...sorted.filter(s => !isDubLang(s.lang))];
   const playable = await filterPlayableStreams(grouped);
   const withDisplay = assignDisplayProviders(playable);
-  res.json(sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks, downloads }, proxyBase));
+  const body = JSON.stringify(sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks, downloads }, proxyBase));
+  cacheSet(respKey, body, RESP_TTL);
+  res.type("application/json").send(body);
 });
 
 export default router;
