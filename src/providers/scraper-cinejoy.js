@@ -1,20 +1,42 @@
 // scraper-cinejoy.js
 //
-// cinejoy.to — flujo cifrado via ECDH P-256 + AES-GCM + WASM (crush.wasm)
-// sobre api.shegu.st. Se usa el módulo de criptografía local
-// vendor/cinejoy-crypto2.js (basado en el chunk DUnJ-byT.js de CineJoy) para
-// resolver /g y los endpoints de sources sin browser automation.
+// cinejoy.pk — flujo cifrado via ECDH P-256 + AES-GCM + WASM (crush.wasm)
+// sobre api.wing.st (antes api.shegu.st — el dominio viejo quedó embebido
+// en el chunk ofuscado, se reescribe en fetch abajo). Se usa el módulo de
+// criptografía local vendor/cinejoy-crypto2.js (basado en el chunk
+// DUnJ-byT.js de CineJoy) para resolver /g y los endpoints de sources sin
+// browser automation.
 
 import { D0 } from "../../vendor/cinejoy-crypto2.js";
 
+// Migración de dominio: el vendor tiene api.shegu.st hardcodeado (ofuscado).
+// Durante D0 se envuelve globalThis.fetch reescribiendo el host — refcount
+// para que D0s concurrentes no restauren el fetch antes de tiempo.
+const CINEJOY_HOST_FIX = { "api.shegu.st": "api.wing.st" };
+const realFetch = globalThis.fetch;
+let cjFetchRefs = 0;
+function cjFetchAcquire() {
+  if (cjFetchRefs++ === 0) {
+    globalThis.fetch = (input, init) => {
+      const url = typeof input === "string" ? input : input?.url;
+      const fixed = url?.replace(/api\.shegu\.st|api\.wing\.st/, (h) => CINEJOY_HOST_FIX[h] ?? h);
+      if (fixed === url) return realFetch(input, init);
+      return realFetch(typeof input === "string" ? fixed : new Request(fixed, input), init);
+    };
+  }
+}
+function cjFetchRelease() {
+  if (--cjFetchRefs === 0) globalThis.fetch = realFetch;
+}
+
 const FETCH_TIMEOUT = 30000;
 
-const PRIORITY_SERVERS = new Set(
-  (process.env.CINEJOY_PRIORITY_SERVERS || "Lisbon")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean)
-);
+// Lista de servers por prioridad. Todos se resuelven y verifican en paralelo
+// (cada uno sale por su propio CDN) — gana el primero en este orden cuyo
+// playlist responda. Así un CDN caído no suma latencia.
+const PRIORITY_SERVERS = (
+  process.env.CINEJOY_PRIORITY_SERVERS || "Lisbon,Solara,Nebula,Athens"
+).split(",").map((s) => s.trim()).filter(Boolean);
 
 function normalizeCaptions(captions = []) {
   return captions.map((c) => ({
@@ -82,38 +104,72 @@ export async function getCinejoyStream({ tmdbId, mediaType, title, year, imdbId,
     e: episode ? Number(episode) : undefined,
   };
 
-  const preferred = [...PRIORITY_SERVERS][0];
-
-  try {
-    const result = await withTimeout(
-      D0(type, params, (ev) => {
-        if (ev?.status === "failed" && ev?.error) {
-          console.warn(`[cinejoy] ${ev.provider}: ${ev.error}`);
-        }
-      }, preferred),
-      FETCH_TIMEOUT,
-      `cinejoy: timeout para ${cacheKey}`
-    );
-
-    if (result?.result?.url) {
-      const stream = {
-        url: result.result.url,
-        type: result.result.sourceType === "mp4" ? "mp4" : "hls",
-        provider: `cinejoy/${preferred || "auto"}`,
-        referer: "https://cinejoy.to/",
-        subtitles: normalizeCaptions(result.result.captions),
-      };
-      console.log(`[cinejoy] stream para ${cacheKey}: ${stream.url}`);
-      cacheSet(cacheKey, stream, TTL_OK);
-      return stream;
+  // El /g puede resolver un server cuyo CDN está caído (playlist 403).
+  // Todos los servers se resuelven + verifican en paralelo — gana el
+  // primero en orden de prioridad cuyo playlist responda.
+  const attempts = await Promise.all(PRIORITY_SERVERS.map(async (preferred) => {
+    let result;
+    cjFetchAcquire();
+    try {
+      result = await withTimeout(
+        D0(type, params, (ev) => {
+          if (ev?.status === "failed" && ev?.error) {
+            console.warn(`[cinejoy] ${ev.provider}: ${ev.error}`);
+          }
+        }, preferred),
+        FETCH_TIMEOUT,
+        `cinejoy: timeout para ${cacheKey}`
+      );
+    } catch (err) {
+      console.warn(`[cinejoy] error para ${cacheKey} (${preferred}):`, err.message);
+      return null;
+    } finally {
+      cjFetchRelease();
     }
 
-    console.warn(`[cinejoy] sin sources para ${cacheKey}: ${result?.failure || "unknown"}`);
-    cacheSet(cacheKey, null, TTL_ERR);
-    return null;
-  } catch (err) {
-    console.warn(`[cinejoy] error para ${cacheKey}:`, err.message);
-    cacheSet(cacheKey, null, TTL_ERR);
-    return null;
+    if (!result?.result?.url) {
+      console.warn(`[cinejoy] ${cacheKey} (${preferred}): sin sources — ${result?.failure || "unknown"}`);
+      return null;
+    }
+
+    const alive = await probePlaylist(result.result.url);
+    if (!alive) {
+      console.warn(`[cinejoy] ${cacheKey} (${preferred}): playlist no responde`);
+      return null;
+    }
+    return { preferred, result };
+  }));
+
+  const ok = attempts.find(Boolean);
+  if (ok) {
+    const { preferred, result } = ok;
+    const stream = {
+      url: result.result.url,
+      type: result.result.sourceType === "mp4" ? "mp4" : "hls",
+      provider: `cinejoy/${preferred}`,
+      referer: "https://cinejoy.pk/",
+      subtitles: normalizeCaptions(result.result.captions),
+    };
+    console.log(`[cinejoy] stream para ${cacheKey} (${preferred}): ${stream.url}`);
+    cacheSet(cacheKey, stream, TTL_OK);
+    return stream;
+  }
+
+  console.warn(`[cinejoy] sin sources para ${cacheKey}: todos los servers fallaron`);
+  cacheSet(cacheKey, null, TTL_ERR);
+  return null;
+}
+
+// GET acotado al playlist: los CDN de cinejoy no contestan HEAD, y el
+// playlist es chico. 403 = CDN del server caído para este contenido.
+async function probePlaylist(url) {
+  try {
+    const r = await fetch(url, {
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36", Referer: "https://cinejoy.pk/" },
+      signal: AbortSignal.timeout(8000),
+    });
+    return r.ok;
+  } catch {
+    return false;
   }
 }

@@ -12,12 +12,6 @@ export { getMegaplayStreams } from "./scraper-megaplay.js";
 export { getMegavidStream } from "./scraper-megavid.js";
 export { getCRSubsForAnime, WANTED_ASS_LANGS } from "./scraper-crunchyroll.js";
 export { getMiruroStreams } from "./miruro.js";
-export {
-  getVideasyStreams,
-  getVideasyMovieStreams,
-  getVideasyTvStreams,
-  getVideasyStream,
-} from "./scraper-videz.js";
 export { getVaplayerStream } from "./scraper-vaplayer.js";
 export { getVidupStream } from "./scraper-vidup.js";
 export { getCinejoyStream } from "./scraper-cinejoy.js";

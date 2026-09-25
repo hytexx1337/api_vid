@@ -175,7 +175,7 @@ export function makeVidRockStreams(result, proxyBase) {
   });
 }
 
-const PROVIDER_ORDER = { videasy: 1, cinejoy: 2, vidup: 3, vaplayer: 4 };
+const PROVIDER_ORDER = { cinejoy: 1, vidup: 2, vaplayer: 3 };
 
 function providerPriority(s) {
   const op = String(s.originalProvider).toLowerCase();
