@@ -1,0 +1,222 @@
+﻿=== HOSTS ===
+  46  www.vidy.st
+   9  cybergate.top
+   3  db.wecollege.net
+   3  rbt1xg5firx9c8lle.ul781kbcu2iyce.cfd
+   3  yozg1bijnq6z9.ipibzv9wfrtt5t1v9.rest
+   2  fonts.googleapis.com
+   2  api.wecollege.net
+   1  static.cloudflareinsights.com
+   1  users.vidy.st
+   1  fonts.gstatic.com
+   1  image.tmdb.org
+   1  moon.quietridge.top
+
+=== REQUESTS ===
+  0 GET  document  200    18003b  www.vidy.st/es/tv/1396/1/1
+  1 GET  stylesheet 200   118726b  www.vidy.st/_next/static/css/89cb51c44a8efa09.css
+  2 GET  script    200     5768b  www.vidy.st/_next/static/chunks/webpack-cd244dadd10f7538.js
+  3 GET  script    200   139983b  www.vidy.st/_next/static/chunks/framework-29322186b44cc109.js
+  4 GET  script    200   118865b  www.vidy.st/_next/static/chunks/main-0220be200bde3feb.js
+  5 GET  script    200   281886b  www.vidy.st/_next/static/chunks/pages/_app-6a3d5f5edf30207e.js
+  6 GET  script    200    20288b  www.vidy.st/_next/static/chunks/1848-b974d59438428bfa.js
+  7 GET  script    200    11526b  www.vidy.st/_next/static/chunks/pages/tv/%5B...params%5D-e17376adb2c6188a.js
+  8 GET  script    200     1200b  www.vidy.st/_next/static/odTP57SDr9N7Rtx67sdzK/_buildManifest.js
+  9 GET  script    200      124b  www.vidy.st/_next/static/odTP57SDr9N7Rtx67sdzK/_ssgManifest.js
+ 10 GET  script    200    30294b  static.cloudflareinsights.com/beacon.min.js/v31edd6df95cf4e85bb4c19e7a9bdbcba1788362987495
+ 11 GET  stylesheet 200    21954b  fonts.googleapis.com/css2
+ 12 GET  stylesheet 200     3883b  fonts.googleapis.com/css2
+ 13 GET  script    200    12052b  www.vidy.st/_next/static/chunks/6501.78cf614e73e31ab0.js
+ 14 GET  script    200    26862b  www.vidy.st/_next/static/chunks/3820-73e303cf0d62c4a5.js
+ 15 GET  script    200   103066b  www.vidy.st/_next/static/chunks/8518-46a8f23f509a06bc.js
+ 16 GET  script    200    16957b  www.vidy.st/_next/static/chunks/122-f2133e5495c6611f.js
+ 17 GET  script    200    10892b  www.vidy.st/_next/static/chunks/8077-f6810159844c461d.js
+ 18 GET  script    200    14624b  www.vidy.st/_next/static/chunks/8599-42994d020e834634.js
+ 19 GET  script    200     7803b  www.vidy.st/_next/static/chunks/4633.e48dc92f000efab6.js
+ 20 GET  script    200    67774b  www.vidy.st/scripts/xyz.js
+ 21 GET  script    200    17228b  users.vidy.st/api/script.js
+ 22 GET  fetch     200     7034b  db.wecollege.net/3/tv/1396/season/1/episode/1
+ 23 GET  fetch     200    69300b  db.wecollege.net/3/tv/1396
+ 24 GET  font      200    35508b  fonts.gstatic.com/s/montserrat/v31/JTUSjIg1_i6t8kCHKm459WlhyyTh89Y.woff2
+ 25 GET  script    200     6934b  www.vidy.st/_next/static/chunks/1132.527808837d27888e.js
+ 26 GET  fetch     200    38296b  db.wecollege.net/3/tv/1396/season/1
+ 27 GET  fetch     200       56b  api.wecollege.net/seed
+ 28 GET  script    ?        0b  rbt1xg5firx9c8lle.ul781kbcu2iyce.cfd/k12oogCXq8B281BWwVeJBp4IV/nrOne
+ 29 GET  stylesheet 200      219b  www.vidy.st/_next/static/css/935cc605e8ac0972.css
+ 30 GET  script    200    32007b  www.vidy.st/_next/static/chunks/5114.f2e7a3a289388233.js
+ 31 GET  script    ?        0b  yozg1bijnq6z9.ipibzv9wfrtt5t1v9.rest/k74514xcq8oHE/nrOne
+ 32 GET  script    200     1260b  www.vidy.st/_next/static/chunks/845.7a564ed4000eadc9.js
+ 33 GET  script    200      623b  www.vidy.st/_next/static/chunks/6451.f86e15c515977e9c.js
+ 34 GET  script    200    27102b  www.vidy.st/_next/static/chunks/2679-958b66cfb5b7b07a.js
+ 35 GET  script    200    37758b  www.vidy.st/_next/static/chunks/5233.401396760a71fa06.js
+ 36 GET  script    200      465b  www.vidy.st/_next/static/chunks/23.39d120eba38ff6c2.js
+ 37 GET  script    200     2311b  www.vidy.st/_next/static/chunks/7546.3bbfb75514433717.js
+ 38 GET  stylesheet 200      575b  www.vidy.st/_next/static/css/e34a2684f7c965e3.css
+ 39 GET  script    200     3735b  www.vidy.st/_next/static/chunks/3722.34cb4c05dafc24f5.js
+ 40 GET  script    200     1370b  www.vidy.st/_next/static/chunks/1851.c9bde8359a2761ea.js
+ 41 GET  script    200     2460b  www.vidy.st/_next/static/chunks/5218.60da88e6c86962b2.js
+ 42 GET  script    200     2461b  www.vidy.st/_next/static/chunks/8818.183407cab5762c7d.js
+ 43 GET  script    200     1514b  www.vidy.st/_next/static/chunks/8981.8fc8ba4ee51ecb3a.js
+ 44 GET  script    200     1287b  www.vidy.st/_next/static/chunks/1905.c494f6e660c666fa.js
+ 45 GET  script    200     1857b  www.vidy.st/_next/static/chunks/4529.29f094da5fea1b3b.js
+ 46 GET  script    200     1141b  www.vidy.st/_next/static/chunks/6783.d46bc24d5fa2f21e.js
+ 47 GET  stylesheet 200      605b  www.vidy.st/_next/static/css/483e4b598f9065d3.css
+ 48 GET  script    200      484b  www.vidy.st/_next/static/chunks/5286.deb78ef02ff4ed17.js
+ 49 GET  image     200   802002b  image.tmdb.org/t/p/original/tsRy63Mu5cu8etL1X7ZLyf7UP1M.jpg
+ 50 GET  script    200      792b  www.vidy.st/_next/static/chunks/457.2edd8a61ac24b5be.js
+ 51 GET  script    200     1116b  www.vidy.st/_next/static/chunks/6519.9ab3d9e37fa0ddce.js
+ 52 GET  image     200      648b  www.vidy.st/flags/us.svg
+ 53 GET  fetch     200     1351b  api.wecollege.net/miami/sources
+ 54 GET  script    200   582092b  www.vidy.st/_next/static/chunks/37a763b4.4bb188b7605754de.js
+ 55 GET  script    200     4340b  www.vidy.st/_next/static/chunks/1573.1ccefc02bd4a10bc.js
+ 56 GET  xhr       200    90117b  moon.quietridge.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 57 GET  image     200     2906b  www.vidy.st/apple-touch-icon.png
+ 58 GET  image     200      195b  www.vidy.st/favicon.svg
+ 59 GET  xhr       200     1210b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 60 GET  xhr       200  5329222b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 61 GET  xhr       200  4306184b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 62 GET  xhr       200  5109397b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 63 GET  xhr       200  4983069b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 64 GET  xhr       200  4238013b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 65 POST xhr       ?        0b  www.vidy.st/cdn-cgi/rum
+ 66 GET  script    ?        0b  rbt1xg5firx9c8lle.ul781kbcu2iyce.cfd/k12oogCXq8B281BWwVeJBp4IV/nrOne
+ 67 GET  script    ?        0b  yozg1bijnq6z9.ipibzv9wfrtt5t1v9.rest/k74514xcq8oHE/nrOne
+ 68 GET  script    ?        0b  rbt1xg5firx9c8lle.ul781kbcu2iyce.cfd/k12oogCXq8B281BWwVeJBp4IV/nrOne
+ 69 GET  script    ?        0b  yozg1bijnq6z9.ipibzv9wfrtt5t1v9.rest/k74514xcq8oHE/nrOne
+ 70 GET  xhr       200        0b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 71 GET  xhr       200        0b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+ 72 GET  xhr       200        0b  cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STl
+
+=== DETALLE wecollege/streams ===
+
+--- req 21: GET https://users.vidy.st/api/script.js
+  headers: {
+    "host": "users.vidy.st",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "connection": "keep-alive",
+    "referer": "https://www.vidy.st/",
+    "sec-fetch-dest": "script",
+    "sec-fetch-mode": "no-cors",
+    "sec-fetch-site": "same-site"
+}
+  status=200 body_file=bodies/0021.bin
+  body: "use strict";(()=>{var se=Object.defineProperty;var ae=(i,e,t)=>e in i?se(i,e,{enumerable:!0,configurable:!0,writable:!0,value:t}):i[e]=t;var h=(i,e,t)=>ae(i,typeof e!="symbol"?e+"":e,t);function oe(i){let e="__DOUBLE_ASTERISK_TOKEN__",t="__SINGLE_ASTERISK_TOKEN__",n=i.replace(/\*\*/g,e).replace(/\*/g,t).replace(/[.+?^${}()|[\]\\]/g,"\\$&");n=n.replace(new RegExp(`/${e}/`,"g"),"/(?:.+/)?"),n=n.replace(new RegExp(e,"g"),".*"),n=n.replace(/\//g,"\\/");let c=n.replace(new RegExp(t,"g"),"[^/]+");return new RegExp("^"+c+"$")}function k(i,e){for(let t of e)try{if(oe(t).test(i))return t}catch(r){console.error(`Invalid pattern: ${t}`,r)}return null}function x(i,e){let t=null;return(...r)=>{t&&clearTimeout(t),t=setTimeout(()=>i(...r),e)}}function F(i){try{let e=window.location.hostname,t=new URL(i).hostname;return t!==e&&t!==""}catch{return!1}}function E(i,e){if(!i)return e;try{let t=JSON.parse(i);return Array.isArray(e)&&!Array.isArray(t)?e:t}catch(t){return console.error("Error parsing JSON:",t),e}}function W(i){let e=i.getAttribute("src");if(!e)return console.error("Script src attribute is missing"),null;let t=e.split("/script.js")[0];if(!t)return console.error("Please provide a valid analytics host"),null;let r=i.getAttribute("data-site-id")||i.getAttribute("site-id");if(!r||isNaN(Number(r)))return console.error("Please provide a valid site ID using the data-site-id attribute"),null;let n=i.getAttribute("data-debounce")?Math.max(0,parseInt(i.getAttribute("data-debounce"))):500,c=E(i.getAttribute("data-skip-patterns"),[]),a=E(i.getAttribute("data-mask-patterns"),[]),s=i.getAttribute("data-api-key")||void 0,o=i.getAttribute("data-replay-batch-size")?Math.max(1,parseInt(i.getAttribute("data-replay-batch-size"))):25,l=i.getAttribute("data-replay-batch-interval")?Math.max(1e3,parseInt(i.getAttribute("data-replay-batch-interval"))):2e3;return{analyticsHost:t,siteId:r,debounceDuration:n,autoTrackPageview:i.getAttribute("data-auto-track-pageview")!=="false",autoTrackSpa:i.getAtt
+
+--- req 22: GET https://db.wecollege.net/3/tv/1396/season/1/episode/1?append_to_response=external_ids&language=es-ES
+  headers: {
+    "host": "db.wecollege.net",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "referer": "https://www.vidy.st/",
+    "origin": "https://www.vidy.st",
+    "connection": "keep-alive",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site"
+}
+  status=200 body_file=bodies/0022.bin
+  body: {"air_date":"2008-01-20","crew":[{"department":"Directing","job":"Director","credit_id":"52542275760ee313280006e8","adult":false,"gender":2,"id":66633,"known_for_department":"Writing","name":"Vince Gilligan","original_name":"Vince Gilligan","popularity":2.614,"profile_path":"/wJIxATESjzsjSgvRhVavOmdamXc.jpg"},{"department":"Writing","job":"Writer","credit_id":"52542275760ee313280006ce","adult":false,"gender":2,"id":66633,"known_for_department":"Writing","name":"Vince Gilligan","original_name":"Vince Gilligan","popularity":2.614,"profile_path":"/wJIxATESjzsjSgvRhVavOmdamXc.jpg"},{"job":"Editor","department":"Editing","credit_id":"52b702ea19c2955402183a66","adult":false,"gender":1,"id":1280071,"known_for_department":"Editing","name":"Lynne Willingham","original_name":"Lynne Willingham","popularity":0.8164,"profile_path":null},{"job":"Director of Photography","department":"Camera","credit_id":"52b7029219c29533d00dd2c1","adult":false,"gender":2,"id":2483,"known_for_department":"Camera","name":"John Toll","original_name":"John Toll","popularity":1.1872,"profile_path":"/cfL9A6tC7L5Ps5fq1o3WpVKGMb1.jpg"},{"job":"Art Direction","department":"Art","credit_id":"62feade5cf4a640080998241","adult":false,"gender":2,"id":1018092,"known_for_department":"Art","name":"James F. Oberlander","original_name":"James F. Oberlander","popularity":0.4582,"profile_path":null},{"job":"Associate Producer","department":"Production","credit_id":"6418a04de7414600b96bf1bd","adult":false,"gender":1,"id":1808170,"known_for_department":"Production","name":"Gina Scheerer","original_name":"Gina Scheerer","popularity":0.4478,"profile_path":null},{"job":"Property Master","department":"Art","credit_id":"690e579da5ef06b8d24c7498","adult":false,"gender":2,"id":2054474,"known_for_department":"Art","name":"Paul Breuninger","original_name":"Paul Breuninger","popularity":0.4112,"profile_path":null}],"episode_number":1,"episode_type":"standard","guest_stars":[{"character":"Steven Gomez","credit_id":"5271b489760ee3
+
+--- req 23: GET https://db.wecollege.net/3/tv/1396?append_to_response=credits,external_ids,similar,videos,recommendations,translations,images&language=es-ES
+  headers: {
+    "host": "db.wecollege.net",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "referer": "https://www.vidy.st/",
+    "origin": "https://www.vidy.st",
+    "connection": "keep-alive",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site"
+}
+  status=200 body_file=bodies/0023.bin
+
+--- req 26: GET https://db.wecollege.net/3/tv/1396/season/1
+  headers: {
+    "host": "db.wecollege.net",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "referer": "https://www.vidy.st/",
+    "origin": "https://www.vidy.st",
+    "connection": "keep-alive",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site"
+}
+  status=200 body_file=bodies/0026.bin
+
+--- req 27: GET https://api.wecollege.net/seed?mediaId=1396
+  headers: {
+    "host": "api.wecollege.net",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "referer": "https://www.vidy.st/",
+    "origin": "https://www.vidy.st",
+    "connection": "keep-alive",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site"
+}
+  status=200 body_file=bodies/0027.bin
+  body: {"seed":"59679210.B3TxxUqmHseb0r9cktHysO","ttlMs":30000}
+
+--- req 53: GET https://api.wecollege.net/miami/sources?title=Breaking%2520Bad&mediaType=tv&year=2008&episodeId=1&seasonId=1&tmdbId=1396&imdbId=tt0903747&enc=2&seed=59679210.B3TxxUqmHseb0r9cktHysO
+  headers: {
+    "host": "api.wecollege.net",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "referer": "https://www.vidy.st/",
+    "origin": "https://www.vidy.st",
+    "connection": "keep-alive",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site"
+}
+  status=200 body_file=bodies/0053.bin
+  body: BRV2lORUibL16jvHkGeOoxDwa8w5Up8tfQDCg9IfZt-TEsB2PNtSqNcx2lgeRdubgaVlfQ__Rlg62l8qBnCLffDoMswnDiesagRSgzGvPZf42nfnyzIRdP1afiZRuerG3l6Zs_q7e_Lavd_mNd9zs9Le4o6NUgoI4VniVRxgHW9LZp25u6ctFgwVLQO0kakr1pscDJBaaSCgL6dty0rmyOPBwIewgjjw_jmZSZeLadzV5Se9UAFOjTqDiJ2IxTEMV7S2ZhYECdnwjKngFlZBe5H5uakBr1RsmuCqpBjyJJTmlceXVKHI2MRWDqpe6OB3iQtelKXXJ6nGEgjYMm0sfJOHO80-Mf0yH19nKiKZB2A3gao0jtxRzZMUzPI1yGT-FdkSJ4RrFRqflF1AMfLXsRsCmLvMZPF-DGxILz3aGZSVFK4Ss069nJ62MG_WcN_aCqqh-uBPJBI7nYrH7Ws1QAjLx85iusqRdJPlDLGzsgNo2-1a16ZZHedxQfFHxjMYoT1QHZyKxUiNE6UU2xmjbhbDMYgWXG8zU77lPdp6tEZvVeOmtwt_k1CDzqPBPRmreik9mPSFghzW9Z272oUSugmPQwudsFBJ8p0soddFDoI0dFpKx50GP4TU4U5TzMFJhCUfKCAdi9hOs8bPMkZCyoLLjQdx0NHw1WhDM3YRkkTNFoo_trNrm6dmYE1Sw5M96fjrbZQka1RfAmm_Gh7qX-0MRoIf1yWsjEmNY_ueLQ9tybvDVKWwf8A1EKpcPpjJQWJVqUvC4-O0J_Psetfwcct6eFb5sFxhAUv-61i5Mg8hWZ0n53aV54qBkiE6bOjSXdFEkVsOoGBp-FqA7UgAry4DFX5uOWunhTZg-UrRCz3VGusWlLWYxsaBda9FeZWbIFGJyQWq6-GuasDXb1t9mrjCNbXEGoOCYOiz08Pi1271VDXDATb_cqqNg_s6W85J8pbPpRHDa92c-VmKX06ogrWU3A4pcz27T3WXavsfEjrYgFmmms7UwuOnyOoy06gO11_2hJHQ7Py9ttn0YxcXSHq2GZwMxFKGZjUOGQlNEVOjkgULcuRywbVTAWm6gt3Z4_NNUO6IMjp1ONeGWMMfWfWKZnBrjCJPm-JPasAipMhOaHiJiAQpN4LzOvaR9IXkWf32OF2SFBO2WYdauBpCzESbUxv8VHgt9kIEB0vOA24TklyXkmbp3YC5TZh3uD3zCeyY12sHgyGJSOREtjcG6eyfMoKYj_WJRTEbfVs94-r8eM19xfE6xZ5SRAYMjdr2wfjF9bkGju8BEQqoHRk46sYCIZ_R0uRrOevjKVFsBBTFzidFpeSnmeltHkLfZGp6nvp5ajM
+
+--- req 56: GET https://moon.quietridge.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STlNB/index-s1080p-v1-a1.m3u8
+  headers: {
+    "host": "moon.quietridge.top",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "origin": "https://www.vidy.st",
+    "connection": "keep-alive",
+    "referer": "https://www.vidy.st/",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site"
+}
+  status=200 body_file=bodies/0056.bin
+
+--- req 59: GET https://cybergate.top/vd/ZVQwNjVpX1NpaU03c19ZRmdlenN0dzpDYmRtcXVwemhTRklWZGNtS1ZuVDhCb2FfbDlWVDdGLVRnaTdYT05STlNB/init-s1080p-v1-a1.mp4
+  headers: {
+    "host": "cybergate.top",
+    "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
+    "accept": "*/*",
+    "accept-language": "en-US,en;q=0.9",
+    "accept-encoding": "gzip, deflate, br, zstd",
+    "origin": "https://www.vidy.st",
+    "connection": "keep-alive",
+    "referer": "https://www.vidy.st/",
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "cross-site"
+}
+  status=200 body_file=bodies/0059.bin
+  body:   body(hex): 000000186674797069736f6d0000000169736f6d61766331000004a26d6f6f760000006c6d76686400000000000000000000000000015f9012c8eba200010000010000000000000000000000000100000000000000000000000000000001000000000000000000000000000040000000000000000000000000000000000000000000000000000000ffffffff000000486d76657800000020747265780000000000000001000000010000000000000000000000000000002074726578000000000000000200000001

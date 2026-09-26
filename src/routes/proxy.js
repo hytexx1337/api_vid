@@ -793,19 +793,36 @@ router.get("/sealed/:token", async (req, res, next) => {
     res.status(r.status);
     const ct = r.headers.get("content-type") || "";
     const isText = /mpegurl|text|json|xml|vtt/i.test(ct);
-    let body;
-    if (isText) {
-      body = sealProxyUrlsInText(await r.text(), proxyBase);
-    } else {
-      body = Buffer.from(await r.arrayBuffer());
-    }
     const _hdr = {};
     r.headers.forEach((v, k) => {
       const kl = k.toLowerCase();
-      if (["content-encoding", "transfer-encoding", "connection", "content-length", "cache-control", "access-control-allow-origin", "access-control-allow-headers", "access-control-allow-methods", "vary", "etag", "last-modified"].includes(kl)) return;
+      if (["content-encoding", "transfer-encoding", "connection", "cache-control", "access-control-allow-origin", "access-control-allow-headers", "access-control-allow-methods", "vary", "etag", "last-modified"].includes(kl)) return;
       _hdr[k] = v;
     });
     _hdr["Content-Type"] = ct;
+
+    if (!isText) {
+      // Binario (mp4, ts, imágenes): streamear — bufferar haría que el
+      // endpoint descargue el archivo completo antes de responder, y el
+      // player nunca ve ni Content-Length ni 206 parciales.
+      res.writeHead(r.status, _hdr);
+      res.on("close", () => r.body?.cancel().catch(() => {}));
+      const reader = r.body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!res.write(value)) await new Promise(ok => res.once("drain", ok));
+        }
+      } finally { res.end(); }
+      return;
+    }
+
+    const body = sealProxyUrlsInText(await r.text(), proxyBase);
+    // El body resealado tiene largo distinto al upstream — descartar el
+    // Content-Length original o el cliente recibe largo incorrecto.
+    delete _hdr["content-length"];
+    delete _hdr["Content-Length"];
     const ext = String(originalPath || "").toLowerCase().match(/\.([a-z0-9]{1,6})(?:\?|#|$)/i)?.[1] || "";
     const isPlaylist = /mpegurl|dash|xml/i.test(ct || "") || ["m3u8", "mpd"].includes(ext);
     const isSubs = /vtt|text\/track|subrip|ass\/octet/i.test(ct || "") || ["vtt", "ass", "srt"].includes(ext);

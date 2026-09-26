@@ -13,6 +13,7 @@ import {
   getVaplayerStream,
   getVidupStream,
   getCinejoyStream,
+  getVidyStream,
   getVixsrcStream,
 } from "../providers/index.js";
 
@@ -69,6 +70,12 @@ router.get("/movie/:tmdbId/:provider", async (req, res) => {
         streams = [makeGenericStream(result, proxyBase, mapMovieTvLang(result.lang, tmdbMeta?.lang))];
         break;
       }
+      case "vidy": {
+        if (!tmdbMeta?.title) break;
+        const result = await getVidyStream({ tmdbId, mediaType: "movie", title: tmdbMeta.title, year: tmdbMeta.year, imdbId: tmdbMeta.imdbId });
+        for (const vs of result?.streams ?? []) streams.push(makeGenericStream(vs, proxyBase, mapMovieTvLang(vs.lang, tmdbMeta?.lang)));
+        break;
+      }
       case "vixsrc": {
         const result = await getVixsrcStream(tmdbId, "movie").catch(() => null);
         if (!result?.masterUrl) break;
@@ -123,6 +130,12 @@ router.get("/tv/:tmdbId/:season/:episode/:provider", async (req, res) => {
         const result = await getCinejoyStream({ tmdbId, mediaType: "tv", title: tmdbMeta.title, year: tmdbMeta.year, imdbId: tmdbMeta.imdbId, season: +season, episode: +episode });
         if (!result?.url) break;
         streams = [makeGenericStream(result, proxyBase, mapMovieTvLang(result.lang, tmdbMeta?.lang))];
+        break;
+      }
+      case "vidy": {
+        if (!tmdbMeta?.title) break;
+        const result = await getVidyStream({ tmdbId, mediaType: "tv", title: tmdbMeta.title, year: tmdbMeta.year, imdbId: tmdbMeta.imdbId, season: +season, episode: +episode });
+        for (const vs of result?.streams ?? []) streams.push(makeGenericStream(vs, proxyBase, mapMovieTvLang(vs.lang, tmdbMeta?.lang)));
         break;
       }
       case "vixsrc": {
