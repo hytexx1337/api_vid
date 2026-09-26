@@ -501,9 +501,14 @@ router.get(["/vixsrc-seg", "/vixsrc-seg.m3u8"], async (req, res) => {
       return res.send(rewriteVixsrcPlaylist(text, targetUrl, proxyBase));
     }
 
+    // vixsrc sirve los segmentos como .html con content-type text/html —
+    // /sealed clasificaría eso como texto y el decode UTF-8 corrompe los
+    // bytes AES-128. Solo se fuerza mp2t en ese caso; los subs .vtt conservan
+    // su content-type real.
+    const segCt = /html/i.test(ct) ? "video/mp2t" : (ct || "video/mp2t");
     res.status(status);
-    res.setHeader("Content-Type", ct || "video/mp2t");
-    setCacheForResponse(res, ct || "video/mp2t", targetUrl);
+    res.setHeader("Content-Type", segCt);
+    setCacheForResponse(res, segCt, targetUrl);
     body.on("error", (err) => { console.error("[vixsrc-seg] pipe error:", err.message); if (!res.headersSent) res.status(502).end(); });
     body.pipe(res);
   } catch (e) { res.status(502).json({ error: e.message }); }
@@ -792,7 +797,9 @@ router.get("/sealed/:token", async (req, res, next) => {
     const r = await fetch(internalUrl, { method: req.method, headers, cache: "no-store" });
     res.status(r.status);
     const ct = r.headers.get("content-type") || "";
-    const isText = /mpegurl|text|json|xml|vtt/i.test(ct);
+    // text/html queda afuera: algunos upstreams sirven binario (segmentos
+    // .html de vixsrc, etc.) con ese CT y el decode UTF-8 los corrompe.
+    const isText = /mpegurl|json|xml|vtt|x-ass|subrip|plain/i.test(ct) || (/^text\//i.test(ct) && !/html/i.test(ct));
     const _hdr = {};
     r.headers.forEach((v, k) => {
       const kl = k.toLowerCase();
