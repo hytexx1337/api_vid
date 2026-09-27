@@ -22,25 +22,42 @@ function upnDecrypt(hexStr) {
   return JSON.parse(Buffer.concat([d.update(data), d.final()]).toString("utf8"));
 }
 
-async function upnShareToM3U8(embedUrl) {
+async function upnShareToM3U8(embedUrl, attempt = 0) {
   // embedUrl es tipo "https://animeav1.uns.bio/#gpz1v8"
   const token = embedUrl.split("#")[1];
   if (!token) return null;
 
-  const r = await fetch(
-    `${UPN_BASE}/api/v1/video?id=${token}&w=1920&h=1080&r=`,
-    {
-      headers: {
-        "User-Agent": PAGE_HEADERS["User-Agent"],
-        "Referer": `${UPN_BASE}/#${token}`,
-      },
-      signal: AbortSignal.timeout(8000),
-    }
-  );
-  if (!r.ok) return null;
+  let r;
+  try {
+    r = await fetch(
+      `${UPN_BASE}/api/v1/video?id=${token}&w=1920&h=1080&r=`,
+      {
+        headers: {
+          "User-Agent": PAGE_HEADERS["User-Agent"],
+          "Referer": `${UPN_BASE}/#${token}`,
+        },
+        signal: AbortSignal.timeout(8000),
+      }
+    );
+  } catch (e) {
+    // Timeout/red intermitente contra animeav1.uns.bio — un reintento antes
+    // de rendirse evita perder el stream por un solo hiccup transitorio.
+    if (attempt === 0) return upnShareToM3U8(embedUrl, 1);
+    throw e;
+  }
+  if (!r.ok) {
+    if (attempt === 0) return upnShareToM3U8(embedUrl, 1);
+    return null;
+  }
 
   const hex  = await r.text();
-  const data = upnDecrypt(hex);
+  let data;
+  try {
+    data = upnDecrypt(hex);
+  } catch (e) {
+    if (attempt === 0) return upnShareToM3U8(embedUrl, 1);
+    throw e;
+  }
 
   // El dominio del CDN en data.cf (fusionpeaknetworks.site, horizenbuild.online,
   // etc.) rota y sus subdominios aleatorios no resuelven DNS — el player real
@@ -465,14 +482,14 @@ function extractAllHlsUrls(html, section) {
   return urls;
 }
 
-// Extrae URLs de UPNShare (server:"UPNShare") de una sección
-function extractUpnShareUrls(html, section) {
+// Extrae URLs de un server:"<name>" específico dentro de una sección (DUB/SUB)
+function extractServerUrls(html, section, serverName) {
   const sectionRe = new RegExp(`${section}:\\[([^\\[]*?)\\]`);
   const sectionMatch = html.match(sectionRe);
   if (!sectionMatch) return [];
 
   const urls = [];
-  const re = /server:"UPNShare",url:"([^"]+)"/g;
+  const re = new RegExp(`server:"${serverName}",url:"([^"]+)"`, "g");
   let m;
   while ((m = re.exec(sectionMatch[1])) !== null) {
     urls.push(m[1]);
@@ -480,8 +497,94 @@ function extractUpnShareUrls(html, section) {
   return urls;
 }
 
+function extractUpnShareUrls(html, section)  { return extractServerUrls(html, section, "UPNShare"); }
+function extractVoeUrls(html, section)       { return extractServerUrls(html, section, "Voe"); }
+function extractMp4UploadUrls(html, section) { return extractServerUrls(html, section, "MP4Upload"); }
+
 function playToM3U8(url) {
   return url.replace("/play/", "/m3u8/");
+}
+
+// ── Voe extractor ────────────────────────────────────────────────
+// voe.sx/e/{id} sirve una página stub con un redirect JS (no HTTP) hacia un
+// dominio random rotativo (ej. jeremyparticipantanything.com). Ahí vive el
+// embed real con <script type="application/json">["<blob>"]</script> — el
+// blob se decodifica con el algoritmo público "decryptF7" (consumet/
+// cloudstream, verificado por sniffing 2026-09-27): rot13 → stripear
+// separadores → base64 → shift -3 por char → reverse → base64 → JSON.
+// El m3u8 resultante (data.source) no requiere Referer para reproducir.
+const VOE_HEADERS = { "User-Agent": PAGE_HEADERS["User-Agent"], Referer: "https://voe.sx/" };
+
+function voeRot13(s) {
+  return s.replace(/[a-zA-Z]/g, (c) => {
+    const base = c <= "Z" ? 65 : 97;
+    return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base);
+  });
+}
+function voeCharShift(s, shift) {
+  return [...s].map((c) => String.fromCharCode(c.charCodeAt(0) - shift)).join("");
+}
+function voeDecryptF7(blob) {
+  let v = voeRot13(blob);
+  for (const p of ["@$", "^^", "~@", "%?", "*~", "!!", "#&"]) v = v.split(p).join("_");
+  v = v.replace(/_/g, "");
+  v = Buffer.from(v, "base64").toString("utf8");
+  v = voeCharShift(v, 3);
+  v = v.split("").reverse().join("");
+  v = Buffer.from(v, "base64").toString("utf8");
+  return JSON.parse(v);
+}
+
+async function voeToM3U8(embedUrl, attempt = 0) {
+  try {
+    const r1 = await fetch(embedUrl, { headers: VOE_HEADERS, signal: AbortSignal.timeout(10000) });
+    if (!r1.ok) return null;
+    const html1 = await r1.text();
+
+    const redirectMatch = html1.match(/window\.location\.href\s*=\s*'([^']+)'/);
+    const realUrl = redirectMatch ? redirectMatch[1] : embedUrl;
+
+    const html2 = realUrl === embedUrl
+      ? html1
+      : await (await fetch(realUrl, { headers: VOE_HEADERS, signal: AbortSignal.timeout(10000) })).text();
+
+    const jsonMatch = html2.match(/<script type="application\/json">\["([^"]+)"\]<\/script>/);
+    if (!jsonMatch) return null;
+
+    const data = voeDecryptF7(jsonMatch[1]);
+    if (!data?.source) return null;
+
+    return {
+      url: data.source,
+      directUrl: data.direct_access_url || null,
+      thumbnailJpg: data.thumbnail || null,
+    };
+  } catch (e) {
+    if (attempt === 0) return voeToM3U8(embedUrl, 1);
+    return null;
+  }
+}
+
+// ── MP4Upload extractor ────────────────────────────────────────────
+// Sin ofuscación ni challenge alguno: el embed HTML trae la URL del MP4 en
+// texto plano dentro de `player.src({type:"video/mp4", src:"..."})`. Solo
+// exige Referer exacto "https://mp4upload.com/" (sin él, 403; con él, 206
+// con Range OK — verificado 2026-09-27).
+const MP4UPLOAD_HEADERS = { "User-Agent": PAGE_HEADERS["User-Agent"], Referer: "https://mp4upload.com/" };
+
+async function mp4uploadToStream(embedUrl, attempt = 0) {
+  try {
+    const r = await fetch(embedUrl, { headers: MP4UPLOAD_HEADERS, signal: AbortSignal.timeout(10000) });
+    if (!r.ok) return null;
+    const html = await r.text();
+    const srcMatch = html.match(/src:\s*"([^"]+\.mp4[^"]*)"/);
+    if (!srcMatch) return null;
+    const posterMatch = html.match(/player\.poster\("([^"]+)"\)/);
+    return { url: srcMatch[1], thumbnailJpg: posterMatch?.[1] || null };
+  } catch (e) {
+    if (attempt === 0) return mp4uploadToStream(embedUrl, 1);
+    return null;
+  }
 }
 
 // Extrae los links de descarga directa (Mega, 1Fichier, MP4Upload, StreamTape, etc.)
@@ -534,46 +637,106 @@ async function scrapeM3U8(slug, episode) {
   const subUrls    = extractAllHlsUrls(html, "SUB");
   const dubUpnUrls = extractUpnShareUrls(html, "DUB");
   const subUpnUrls = extractUpnShareUrls(html, "SUB");
+  const dubVoeUrls = extractVoeUrls(html, "DUB");
+  const subVoeUrls = extractVoeUrls(html, "SUB");
+  const dubMp4uUrls = extractMp4UploadUrls(html, "DUB");
+  const subMp4uUrls = extractMp4UploadUrls(html, "SUB");
   const downloads  = extractDownloadLinks(html);
 
-  console.log(`[scraper] slug=${slug} ep=${usedEp} | DUB HLS=${dubUrls.length} UPN=${dubUpnUrls.length} | SUB HLS=${subUrls.length} UPN=${subUpnUrls.length}`);
+  console.log(`[scraper] slug=${slug} ep=${usedEp} | DUB HLS=${dubUrls.length} UPN=${dubUpnUrls.length} Voe=${dubVoeUrls.length} MP4U=${dubMp4uUrls.length} | SUB HLS=${subUrls.length} UPN=${subUpnUrls.length} Voe=${subVoeUrls.length} MP4U=${subMp4uUrls.length}`);
 
-  if (dubUrls.length === 0 && subUrls.length === 0 && dubUpnUrls.length === 0 && subUpnUrls.length === 0) {
+  if (dubUrls.length === 0 && subUrls.length === 0 && dubUpnUrls.length === 0 && subUpnUrls.length === 0 && dubVoeUrls.length === 0 && subVoeUrls.length === 0 && dubMp4uUrls.length === 0 && subMp4uUrls.length === 0) {
     throw new Error("No player URLs found in page HTML");
   }
 
-  // Resolver UPNShare DUB + SUB en paralelo
-  // SUB solo se usa si DUB no tiene UPNShare
-  const effectiveUpnUrls = dubUpnUrls.length > 0 ? dubUpnUrls : subUpnUrls;
-  const effectiveUpnType = dubUpnUrls.length > 0 ? "dub" : "sub";
-  const upnPromises = effectiveUpnUrls.map(u => upnShareToM3U8(u).catch(() => null));
+  // Resolver UPNShare, Voe y MP4Upload de DUB y SUB en paralelo, SIEMPRE
+  // todos los tipos de cada servidor — un fallo transitorio en uno no debe
+  // tirar todo el resultado si otro (nunca probado antes) hubiera funcionado.
+  const dubUpnPromises = dubUpnUrls.map(u => upnShareToM3U8(u).catch(() => null));
+  const subUpnPromises = subUpnUrls.map(u => upnShareToM3U8(u).catch(() => null));
+  const dubVoePromises = dubVoeUrls.map(u => voeToM3U8(u).catch(() => null));
+  const subVoePromises = subVoeUrls.map(u => voeToM3U8(u).catch(() => null));
+  const dubMp4uPromises = dubMp4uUrls.map(u => mp4uploadToStream(u).catch(() => null));
+  const subMp4uPromises = subMp4uUrls.map(u => mp4uploadToStream(u).catch(() => null));
 
   // Todos los servidores DUB HLS + primer servidor SUB HLS
   const streams = [];
   dubUrls.forEach((url, i) => streams.push({ url: playToM3U8(url), type: "dub", server: i + 1 }));
   if (subUrls.length > 0) streams.push({ url: playToM3U8(subUrls[0]), type: "sub", server: 1 });
 
-  // Agregar servidores UPNShare resueltos
-  // El número de servidor es relativo al tipo: si ya hay 1 SUB HLS, el UPNShare SUB es srv2
+  // Agregar servidores UPNShare resueltos — el número de servidor es
+  // relativo al tipo: si ya hay 1 SUB HLS, el UPNShare SUB es srv2
   const dubHlsCount = dubUrls.length;
   const subHlsCount = subUrls.length > 0 ? 1 : 0;
-  const upnResults = await Promise.all(upnPromises);
-  upnResults.forEach((upn, i) => {
-    if (upn?.url) {
-      const baseCount = effectiveUpnType === "dub" ? dubHlsCount : subHlsCount;
+  const [dubUpnResults, subUpnResults, dubVoeResults, subVoeResults, dubMp4uResults, subMp4uResults] = await Promise.all([
+    Promise.all(dubUpnPromises),
+    Promise.all(subUpnPromises),
+    Promise.all(dubVoePromises),
+    Promise.all(subVoePromises),
+    Promise.all(dubMp4uPromises),
+    Promise.all(subMp4uPromises),
+  ]);
+  const pushUpnResults = (results, type, baseCount) => {
+    results.forEach((upn, i) => {
+      if (!upn?.url) return;
       const serverNum = baseCount + i + 1;
-      console.log(`[scraper] UPNShare(${effectiveUpnType}) server${serverNum}: ${upn.url}`);
+      console.log(`[scraper] UPNShare(${type}) server${serverNum}: ${upn.url}`);
       streams.push({
         url:          upn.url,
-        type:         effectiveUpnType,
+        type,
         server:       serverNum,
         provider:     "upnshare",
         cfUrl:        upn.url,
         ...(upn.thumbnailVtt && { thumbnailVtt: upn.thumbnailVtt }),
         ...(upn.thumbnailJpg && { thumbnailJpg: upn.thumbnailJpg }),
       });
-    }
-  });
+    });
+  };
+  pushUpnResults(dubUpnResults, "dub", dubHlsCount);
+  pushUpnResults(subUpnResults, "sub", subHlsCount);
+
+  // Voe: server number sigue después de HLS + UPNShare de ese mismo tipo
+  const dubBeforeVoe = dubHlsCount + dubUpnResults.filter(r => r?.url).length;
+  const subBeforeVoe = subHlsCount + subUpnResults.filter(r => r?.url).length;
+  const pushVoeResults = (results, type, baseCount) => {
+    results.forEach((voe, i) => {
+      if (!voe?.url) return;
+      const serverNum = baseCount + i + 1;
+      console.log(`[scraper] Voe(${type}) server${serverNum}: ${voe.url}`);
+      streams.push({
+        url:          voe.url,
+        type,
+        server:       serverNum,
+        provider:     "voe",
+        cfUrl:        voe.url,
+        ...(voe.directUrl && { directUrl: voe.directUrl }),
+        ...(voe.thumbnailJpg && { thumbnailJpg: voe.thumbnailJpg }),
+      });
+    });
+  };
+  pushVoeResults(dubVoeResults, "dub", dubBeforeVoe);
+  pushVoeResults(subVoeResults, "sub", subBeforeVoe);
+
+  // MP4Upload: server number sigue después de HLS + UPNShare + Voe de ese tipo
+  const dubBeforeMp4u = dubBeforeVoe + dubVoeResults.filter(r => r?.url).length;
+  const subBeforeMp4u = subBeforeVoe + subVoeResults.filter(r => r?.url).length;
+  const pushMp4uResults = (results, type, baseCount) => {
+    results.forEach((mp4u, i) => {
+      if (!mp4u?.url) return;
+      const serverNum = baseCount + i + 1;
+      console.log(`[scraper] MP4Upload(${type}) server${serverNum}: ${mp4u.url}`);
+      streams.push({
+        url:          mp4u.url,
+        type,
+        server:       serverNum,
+        provider:     "mp4upload",
+        cfUrl:        mp4u.url,
+        ...(mp4u.thumbnailJpg && { thumbnailJpg: mp4u.thumbnailJpg }),
+      });
+    });
+  };
+  pushMp4uResults(dubMp4uResults, "dub", dubBeforeMp4u);
+  pushMp4uResults(subMp4uResults, "sub", subBeforeMp4u);
 
   streams.forEach(s => console.log(`[scraper] m3u8 (${s.type} srv${s.server}): ${s.url}`));
   // Cachear también con el ep que realmente funcionó (para películas que usan /0)

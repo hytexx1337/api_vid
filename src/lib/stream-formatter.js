@@ -10,6 +10,11 @@ export function normalizeLang(lang, originalProvider = "") {
   if (l === "eng") return { lang: "ENG", langLabel: "English" };
 
   if (l === "japanese" || l === "jap" || l.startsWith("ja") || l.includes("jap")) {
+    // ja-sub-lat ya trae el idioma del sub en el tag (japonés + sub latino
+    // quemado — animeav1 no tiene subs por separado). Va antes del chequeo
+    // de provider para que los CDNs alternativos de animeav1 (voe,
+    // mp4upload) no caigan en JAP-SUB.
+    if (l === "ja-sub-lat") return { lang: "JAP-ES-HS", langLabel: "Japonés (sub español quemado)" };
     // Hardsub detection. upnshare es un CDN alternativo usado dentro del
     // pipeline de animeav1 (ver providers/scraper.js) — mismo contenido
     // (japonés con sub español quemado), solo cambia el hosting del stream.

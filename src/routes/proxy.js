@@ -739,7 +739,10 @@ router.get("/mp4-proxy", async (req, res) => {
   try {
     const { statusCode, headers: upHeaders, body } = await proxyFetch(url, { ...HEADERS, ...extraHeaders, ...(range ? { Range: range } : {}) });
     if (statusCode >= 400 && statusCode !== 206) return res.status(statusCode).json({ error: `Upstream error: ${statusCode}` });
-    const contentType = upHeaders["content-type"] ?? "video/mp4";
+    // Forzar video/mp4 siempre: mp4upload.com (y otros) sirven
+    // application/octet-stream, que hace que el navegador descargue el
+    // archivo en vez de reproducirlo inline. Este endpoint es SOLO para mp4.
+    const contentType = "video/mp4";
     const contentLength = upHeaders["content-length"];
     const contentRange = upHeaders["content-range"];
     res.status(statusCode);

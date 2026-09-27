@@ -365,7 +365,18 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set()) {
 
   const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult, aniwavesResult, animeheavenResult] = await Promise.allSettled([
     skip("animeav1") ? Promise.resolve(null) : timed2("animeav1", getLatinoStream(anilistId, episode).then(v => {
-      for (const s of v?.streams ?? []) pw({ url: s.cfUrl ?? s.url, type: "hls", originalProvider: s.provider ?? "animeav1" });
+      for (const s of v?.streams ?? []) {
+        // MP4Upload: mp4 directo — su CDN exige Referer del embed. Verificar
+        // sin headers da 403 y cachea false bajo verify:{url}, excluyendo el
+        // stream antes de que filterPlayableStreams pruebe proxy_url.
+        const isMp4u = s.provider === "mp4upload";
+        pw({
+          url: s.cfUrl ?? s.url,
+          headers: isMp4u ? { Referer: "https://mp4upload.com/" } : undefined,
+          type: isMp4u ? "mp4" : "hls",
+          originalProvider: s.provider ?? "animeav1",
+        });
+      }
       return v;
     })),
     skip("megaplay") ? Promise.resolve({ dub: null, sub: null }) : timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode)).then(v => {
@@ -661,8 +672,19 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       const lang = type === "dub" ? "es-lat" : "ja-sub-lat";
       const originalProvider = streamProvider ?? (server > 1 ? `animeav1-s${server}` : "animeav1");
       const s = makeAnimeStream(proxyBase, url, "auto", lang, originalProvider);
-      const upnStreamTarget = streamProvider === "upnshare" ? cfUrl : url;
-      if (upnStreamTarget) s.proxy_url = `${proxyBase}/upn-stream.m3u8?u=${encodeURIComponent(upnStreamTarget)}`;
+      // UPNShare: proxy dedicado (Referer animeav1.uns.bio hardcodeado ahí).
+      // Voe: su CDN (cloudwindow-route.com) bloquea el navegador del cliente
+      // yendo directo (fingerprint/anti-bot) pero acepta fetch server-side
+      // sin problema — por eso va por nuestro proxy genérico, no el de UPN.
+      if (streamProvider === "upnshare") {
+        s.proxy_url = `${proxyBase}/upn-stream.m3u8?u=${encodeURIComponent(cfUrl)}`;
+      } else if (streamProvider === "voe") {
+        s.proxy_url = `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(url)}`;
+      } else if (streamProvider === "mp4upload") {
+        s.proxy_url = `${proxyBase}/mp4-proxy?url=${encodeURIComponent(url)}&headers=${encodeURIComponent(JSON.stringify({ Referer: "https://mp4upload.com/" }))}`;
+      } else if (url) {
+        s.proxy_url = `${proxyBase}/upn-stream.m3u8?u=${encodeURIComponent(url)}`;
+      }
       if (thumbnailVtt) {
         s.thumbnailVtt = thumbnailVtt;
         s.thumbnailVttProxy = `${proxyBase}/fetch?url=${encodeURIComponent(thumbnailVtt)}&ref=${encodeURIComponent(new URL(thumbnailVtt).origin + "/")}&ct=${encodeURIComponent("text/vtt")}`;
