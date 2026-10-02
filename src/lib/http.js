@@ -6,6 +6,18 @@ import { HEADERS, KAI_HTTP_PROXY, REANIME_CF_WORKER, REANIME_PROXY } from "../co
 
 const PROXY_AGENT_CACHE = new Map();
 const REANIME_WORKER_HOST_RE = /(^|\.)((reanime\.to)|(flixcloud\.cc))$/i;
+const REANIME_DEBUG = /^(1|true|yes|on)$/i.test(process.env.REANIME_DEBUG || "");
+
+function shortUrl(value) {
+  if (!value) return value;
+  return value.length > 180 ? `${value.slice(0, 177)}...` : value;
+}
+
+function logReanimeHttp(message, extra = null) {
+  if (!REANIME_DEBUG) return;
+  if (extra) console.info(`[reanime:http] ${message}`, extra);
+  else console.info(`[reanime:http] ${message}`);
+}
 
 function getAxiosProxyAgents(proxyUrl) {
   if (!proxyUrl) return null;
@@ -62,6 +74,7 @@ export async function fetchWithProxy(url, { proxyUrl = null, timeoutMs = 30000, 
 
 export async function fetchReanime(url, options = {}) {
   const method = String(options.method || "GET").toUpperCase();
+  const startedAt = Date.now();
   if (REANIME_CF_WORKER && method === "GET") {
     try {
       const parsed = new URL(url);
@@ -72,14 +85,48 @@ export async function fetchReanime(url, options = {}) {
         if (options.headers?.["Accept-Language"] || options.headers?.["accept-language"]) {
           workerHeaders["Accept-Language"] = options.headers["Accept-Language"] || options.headers["accept-language"];
         }
-        return fetch(workerUrl, {
+        logReanimeHttp("worker request:start", { method, target: shortUrl(parsed.href), workerUrl: shortUrl(workerUrl) });
+        const response = await fetch(workerUrl, {
           headers: workerHeaders,
           signal: options.signal || AbortSignal.timeout(options.timeoutMs || 30000),
         });
+        logReanimeHttp("worker request:end", {
+          method,
+          target: shortUrl(parsed.href),
+          status: response.status,
+          ms: Date.now() - startedAt,
+          contentType: response.headers.get("content-type") || "",
+        });
+        return response;
       }
     } catch {}
   }
-  return fetchWithProxy(url, { proxyUrl: REANIME_PROXY, ...options });
+  logReanimeHttp("direct/proxy request:start", {
+    method,
+    target: shortUrl(url),
+    viaProxy: Boolean(REANIME_PROXY),
+  });
+  try {
+    const response = await fetchWithProxy(url, { proxyUrl: REANIME_PROXY, ...options });
+    logReanimeHttp("direct/proxy request:end", {
+      method,
+      target: shortUrl(url),
+      viaProxy: Boolean(REANIME_PROXY),
+      status: response.status,
+      ms: Date.now() - startedAt,
+      contentType: response.headers.get("content-type") || "",
+    });
+    return response;
+  } catch (error) {
+    logReanimeHttp("direct/proxy request:error", {
+      method,
+      target: shortUrl(url),
+      viaProxy: Boolean(REANIME_PROXY),
+      ms: Date.now() - startedAt,
+      error: error?.message || String(error),
+    });
+    throw error;
+  }
 }
 
 export async function fetchJson(url, options = {}) {
