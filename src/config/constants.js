@@ -73,6 +73,8 @@ export const CC_SUBS = "public, max-age=3600, s-maxage=3600, stale-while-revalid
 export const EDGE_PROXY_BASE = process.env.EDGE_PROXY_BASE?.replace(/\/$/, "") || null;
 export const PROXY_CDN_BASE = process.env.PROXY_CDN_BASE?.replace(/\/$/, "") || null;
 export const KAI_HTTP_PROXY = process.env.KAI_HTTP_PROXY;
+export const REANIME_CF_WORKER = process.env.REANIME_CF_WORKER?.replace(/\/$/, "") || process.env.REANIME_WORKER?.replace(/\/$/, "") || null;
+export const REANIME_PROXY = process.env.REANIME_PROXY || process.env.REANIME_HTTP_PROXY || null;
 export const KAI_CF_WORKER = process.env.KAI_CF_WORKER?.replace(/\/$/, "");
 export const MIRURO_CF_WORKER = process.env.MIRURO_CF_WORKER?.replace(/\/$/, "");
 export const MIRURO_API = process.env.MIRURO_API_URL || "http://localhost:8001";

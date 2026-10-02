@@ -1,5 +1,86 @@
+import axios from "axios";
+import { HttpsProxyAgent } from "https-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 import { request as undiciRequest, fetch as undiciFetch, ProxyAgent } from "undici";
-import { HEADERS, KAI_HTTP_PROXY } from "../config/constants.js";
+import { HEADERS, KAI_HTTP_PROXY, REANIME_CF_WORKER, REANIME_PROXY } from "../config/constants.js";
+
+const PROXY_AGENT_CACHE = new Map();
+const REANIME_WORKER_HOST_RE = /(^|\.)((reanime\.to)|(flixcloud\.cc))$/i;
+
+function getAxiosProxyAgents(proxyUrl) {
+  if (!proxyUrl) return null;
+  if (PROXY_AGENT_CACHE.has(proxyUrl)) return PROXY_AGENT_CACHE.get(proxyUrl);
+
+  const lower = proxyUrl.toLowerCase();
+  const agent = lower.startsWith("socks")
+    ? new SocksProxyAgent(proxyUrl)
+    : new HttpsProxyAgent(proxyUrl);
+  const out = { httpAgent: agent, httpsAgent: agent };
+  PROXY_AGENT_CACHE.set(proxyUrl, out);
+  return out;
+}
+
+function toFetchLikeResponse(status, headers, data) {
+  const body = Buffer.isBuffer(data) ? data : Buffer.from(data ?? "");
+  const responseHeaders = new Headers();
+  for (const [key, value] of Object.entries(headers || {})) {
+    if (value === undefined || value === null) continue;
+    if (Array.isArray(value)) responseHeaders.set(key, value.join(", "));
+    else responseHeaders.set(key, String(value));
+  }
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: responseHeaders,
+    async text() { return body.toString("utf8"); },
+    async json() { return JSON.parse(body.toString("utf8")); },
+    async arrayBuffer() { return body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength); },
+  };
+}
+
+export async function fetchWithProxy(url, { proxyUrl = null, timeoutMs = 30000, ...options } = {}) {
+  if (!proxyUrl) {
+    return fetch(url, { ...options, signal: options.signal || AbortSignal.timeout(timeoutMs) });
+  }
+
+  const agents = getAxiosProxyAgents(proxyUrl);
+  const response = await axios.request({
+    url,
+    method: options.method || "GET",
+    headers: options.headers,
+    data: options.body,
+    responseType: "arraybuffer",
+    timeout: timeoutMs,
+    proxy: false,
+    decompress: false,
+    validateStatus: () => true,
+    ...(agents || {}),
+  });
+
+  return toFetchLikeResponse(response.status, response.headers, response.data);
+}
+
+export async function fetchReanime(url, options = {}) {
+  const method = String(options.method || "GET").toUpperCase();
+  if (REANIME_CF_WORKER && method === "GET") {
+    try {
+      const parsed = new URL(url);
+      if (REANIME_WORKER_HOST_RE.test(parsed.hostname)) {
+        const workerUrl = `${REANIME_CF_WORKER}/fetch?url=${encodeURIComponent(parsed.href)}`;
+        const workerHeaders = {};
+        if (options.headers?.Accept || options.headers?.accept) workerHeaders.Accept = options.headers.Accept || options.headers.accept;
+        if (options.headers?.["Accept-Language"] || options.headers?.["accept-language"]) {
+          workerHeaders["Accept-Language"] = options.headers["Accept-Language"] || options.headers["accept-language"];
+        }
+        return fetch(workerUrl, {
+          headers: workerHeaders,
+          signal: options.signal || AbortSignal.timeout(options.timeoutMs || 30000),
+        });
+      }
+    } catch {}
+  }
+  return fetchWithProxy(url, { proxyUrl: REANIME_PROXY, ...options });
+}
 
 export async function fetchJson(url, options = {}) {
   const res = await fetch(url, {
