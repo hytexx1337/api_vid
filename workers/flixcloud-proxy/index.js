@@ -49,14 +49,15 @@ function isProbablyChallenge(text, contentType) {
 
 function headersForTarget(target, request) {
   const parsed = new URL(target);
-  const referer = ALLOWED_HOST_RE.test(parsed.hostname) && /(^|\.)reanime\.to$/i.test(parsed.hostname)
-    ? REANIME_REFERER
-    : FLIX_REFERER;
+  const isReanime = /(^|\.)reanime\.to$/i.test(parsed.hostname);
+  const referer = isReanime ? REANIME_REFERER : FLIX_REFERER;
   return {
     "User-Agent": UA,
     "Referer": referer,
     "Origin": new URL(referer).origin,
-    "Accept": request.headers.get("accept") || "*/*",
+    // reanime.to/search parece más sensible a headers que flixcloud; evitar
+    // reenviar Accepts "ricos" del backend y mantener algo cercano a curl.
+    "Accept": isReanime ? "*/*" : (request.headers.get("accept") || "*/*"),
     "Accept-Language": request.headers.get("accept-language") || "es-419,es;q=0.9,en;q=0.8",
   };
 }

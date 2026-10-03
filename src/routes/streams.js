@@ -460,10 +460,24 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set()) {
 
 async function getReanimeCached(anilistId, episode, cacheKey) {
   const hit = cacheGet(cacheKey);
-  if (hit) return hit;
+  const reanimeDebug = /^(1|true|yes|on)$/i.test(process.env.REANIME_DEBUG || "");
+  if (hit) {
+    if (reanimeDebug) console.log("[reanime:route] cache hit", { anilistId, episode, cacheKey });
+    return hit;
+  }
   if (!isProviderEnabled("reanime")) return { sub: null, dub: null };
   try {
+    if (reanimeDebug) console.log("[reanime:route] provider start", { anilistId, episode, cacheKey });
     const value = await getReanimeStreams(anilistId, episode);
+    if (reanimeDebug) {
+      console.log("[reanime:route] provider end", {
+        anilistId,
+        episode,
+        cacheKey,
+        sub: Boolean(value?.sub),
+        dub: Boolean(value?.dub),
+      });
+    }
     cacheSet(cacheKey, value, REANIME_STREAM_TTL);
     return value;
   } catch (e) {
