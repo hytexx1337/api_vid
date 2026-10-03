@@ -9,6 +9,7 @@ const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,
 const H = { "User-Agent": UA, Accept: "application/json, */*" };
 const REANIME_DEBUG = /^(1|true|yes|on)$/i.test(process.env.REANIME_DEBUG || "");
 const seriesInFlight = new Map();
+const episodeSourcesInFlight = new Map();
 
 function dbg(message, extra = null) {
   if (!REANIME_DEBUG) return;
@@ -176,38 +177,57 @@ async function resolveSeries(anilistId) {
 const SERVER_PRIORITY = { "HD-2": 0, "HD-1": 1 };
 const sortByPriority = (arr) => arr.slice().sort((a, b) => (SERVER_PRIORITY[a.serverName] ?? 9) - (SERVER_PRIORITY[b.serverName] ?? 9));
 
-async function resolveReanimeStream(anilistId, audio, ep, series = null) {
+async function resolveEpisodeSources(anilistId, ep, series) {
+  const key = `${anilistId}:${ep}`;
+  if (episodeSourcesInFlight.has(key)) {
+    dbg("resolveEpisodeSources in-flight hit", { anilistId, episode: ep, key });
+    return episodeSourcesInFlight.get(key);
+  }
+
+  const run = (async () => {
+    const slug = series.animeId;
+    dbg("resolveEpisodeSources start", { anilistId, episode: ep, slug, title: series.title });
+    const [watchRes, flixRes] = await Promise.allSettled([
+      fetchReanime(`${BASE}/api/watch/${slug}/${ep}`, { headers: H, timeoutMs: 20000 }).then((r) => {
+        if (!r.ok) throw new Error(`watch ${r.status}`);
+        return r.json();
+      }),
+      fetchReanime(`${BASE}/api/flix/${anilistId}/${ep}`, { headers: H, timeoutMs: 20000 }).then((r) => {
+        if (!r.ok) throw new Error(`flix ${r.status}`);
+        return r.json();
+      }),
+    ]);
+    const watchData = watchRes.status === "fulfilled" ? watchRes.value : null;
+    const flixData = flixRes.status === "fulfilled" ? flixRes.value : null;
+    dbg("resolveEpisodeSources upstream summary", {
+      anilistId,
+      episode: ep,
+      watch: watchRes.status === "fulfilled" ? { ok: true, links: watchData?.episode_links?.length ?? 0 } : { ok: false, error: watchRes.reason?.message || String(watchRes.reason) },
+      flix: flixRes.status === "fulfilled" ? { ok: true, servers: flixData?.servers?.length ?? 0, success: Boolean(flixData?.success) } : { ok: false, error: flixRes.reason?.message || String(flixRes.reason) },
+    });
+
+    const links = [...(watchData?.episode_links ?? [])];
+    if (flixData?.success && flixData?.servers) {
+      const seen = new Set(links.map((s) => s["$id"]));
+      for (const s of flixData.servers) if (!seen.has(s["$id"])) links.push(s);
+    }
+
+    return { watchData, flixData, links };
+  })().finally(() => {
+    episodeSourcesInFlight.delete(key);
+  });
+
+  episodeSourcesInFlight.set(key, run);
+  return run;
+}
+
+async function resolveReanimeStream(anilistId, audio, ep, series = null, episodeSources = null) {
   dbg("resolveReanimeStream start", { anilistId, audio, episode: ep });
   const resolvedSeries = series || await resolveSeries(anilistId);
   const slug = resolvedSeries.animeId;
   dbg("resolveReanimeStream series resolved", { anilistId, audio, episode: ep, slug, title: resolvedSeries.title });
-
-  const [watchRes, flixRes] = await Promise.allSettled([
-    fetchReanime(`${BASE}/api/watch/${slug}/${ep}`, { headers: H, timeoutMs: 20000 }).then((r) => {
-      if (!r.ok) throw new Error(`watch ${r.status}`);
-      return r.json();
-    }),
-    fetchReanime(`${BASE}/api/flix/${anilistId}/${ep}`, { headers: H, timeoutMs: 20000 }).then((r) => {
-      if (!r.ok) throw new Error(`flix ${r.status}`);
-      return r.json();
-    }),
-  ]);
-  const watchData = watchRes.status === "fulfilled" ? watchRes.value : null;
-  const flixData = flixRes.status === "fulfilled" ? flixRes.value : null;
-  dbg("resolveReanimeStream upstream summary", {
-    anilistId,
-    audio,
-    episode: ep,
-    watch: watchRes.status === "fulfilled" ? { ok: true, links: watchData?.episode_links?.length ?? 0 } : { ok: false, error: watchRes.reason?.message || String(watchRes.reason) },
-    flix: flixRes.status === "fulfilled" ? { ok: true, servers: flixData?.servers?.length ?? 0, success: Boolean(flixData?.success) } : { ok: false, error: flixRes.reason?.message || String(flixRes.reason) },
-  });
-
-  const links = [...(watchData?.episode_links ?? [])];
-  if (flixData?.success && flixData?.servers) {
-    const seen = new Set(links.map((s) => s["$id"]));
-    for (const s of flixData.servers) if (!seen.has(s["$id"])) links.push(s);
-  }
-
+  const sources = episodeSources || await resolveEpisodeSources(anilistId, ep, resolvedSeries);
+  const { watchData, links } = sources;
   const audioTypes = audio === "sub" ? ["sub", "s-sub"] : ["dub", "s-dub"];
   const servers = sortByPriority(links.filter((s) => audioTypes.includes(s.dataType)));
   dbg("resolveReanimeStream server candidates", {
@@ -283,10 +303,19 @@ export async function getReanimeStreams(anilistId, episode) {
   const ep = parseInt(episode);
   dbg("getReanimeStreams start", { anilistId, episode: ep });
   const series = await resolveSeries(anilistId);
-  const [subResult, dubResult] = await Promise.allSettled([
-    resolveReanimeStream(anilistId, "sub", ep, series),
-    resolveReanimeStream(anilistId, "dub", ep, series),
-  ]);
+  const episodeSources = await resolveEpisodeSources(anilistId, ep, series);
+  let subResult;
+  let dubResult;
+  try {
+    subResult = { status: "fulfilled", value: await resolveReanimeStream(anilistId, "sub", ep, series, episodeSources) };
+  } catch (error) {
+    subResult = { status: "rejected", reason: error };
+  }
+  try {
+    dubResult = { status: "fulfilled", value: await resolveReanimeStream(anilistId, "dub", ep, series, episodeSources) };
+  } catch (error) {
+    dubResult = { status: "rejected", reason: error };
+  }
   dbg("getReanimeStreams result", {
     anilistId,
     episode: ep,

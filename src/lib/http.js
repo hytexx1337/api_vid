@@ -5,7 +5,7 @@ import { request as undiciRequest, fetch as undiciFetch, ProxyAgent } from "undi
 import { HEADERS, KAI_HTTP_PROXY, REANIME_CF_WORKER, REANIME_PROXY } from "../config/constants.js";
 
 const PROXY_AGENT_CACHE = new Map();
-const FLIXCLOUD_WORKER_HOST_RE = /(^|\.)flixcloud\.cc$/i;
+const REANIME_WORKER_HOST_RE = /(^|\.)((reanime\.to)|(flixcloud\.cc))$/i;
 const REANIME_DEBUG = /^(1|true|yes|on)$/i.test(process.env.REANIME_DEBUG || "");
 
 function shortUrl(value) {
@@ -78,7 +78,7 @@ export async function fetchReanime(url, options = {}) {
   if (REANIME_CF_WORKER && method === "GET") {
     try {
       const parsed = new URL(url);
-      if (FLIXCLOUD_WORKER_HOST_RE.test(parsed.hostname)) {
+      if (REANIME_WORKER_HOST_RE.test(parsed.hostname)) {
         const workerUrl = `${REANIME_CF_WORKER}/fetch?url=${encodeURIComponent(parsed.href)}`;
         const workerHeaders = {};
         if (options.headers?.Accept || options.headers?.accept) workerHeaders.Accept = options.headers.Accept || options.headers.accept;
