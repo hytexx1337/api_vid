@@ -67,6 +67,17 @@ function initDb() {
         UNIQUE (anime_id, episode, file)
       );
     `);
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS episode_thumbnails (
+        anime_id TEXT NOT NULL,
+        episode TEXT NOT NULL,
+        variant TEXT NOT NULL,
+        vtt_key TEXT NOT NULL,
+        source_provider TEXT,
+        archived_at INTEGER NOT NULL,
+        PRIMARY KEY (anime_id, episode, variant)
+      );
+    `);
     return dbInstance;
   } catch (e) {
     console.warn("[cache] node:sqlite no disponible, cache persistente deshabilitada:", e.message);
@@ -251,6 +262,45 @@ export function deleteR2Archive(animeId, episode, lang) {
     else db.prepare(`DELETE FROM r2_archive WHERE anime_id = ? AND episode = ?`).run(String(animeId), String(episode));
   } catch (e) {
     console.warn("[cache] deleteR2Archive error:", e.message);
+  }
+}
+
+export function upsertEpisodeThumbnail({ animeId, episode, variant, vttKey, sourceProvider = null }) {
+  if (!db || !animeId || !episode || !variant || !vttKey) return false;
+  try {
+    db.prepare(`
+      INSERT INTO episode_thumbnails (anime_id, episode, variant, vtt_key, source_provider, archived_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(anime_id, episode, variant) DO UPDATE SET
+        vtt_key = excluded.vtt_key,
+        source_provider = excluded.source_provider,
+        archived_at = excluded.archived_at
+    `).run(String(animeId), String(episode), String(variant), String(vttKey), sourceProvider, Date.now());
+    return true;
+  } catch (e) {
+    console.warn("[cache] upsertEpisodeThumbnail error:", e.message);
+    return false;
+  }
+}
+
+export function getEpisodeThumbnails(animeId, episode) {
+  if (!db) return {};
+  try {
+    const rows = db.prepare(
+      `SELECT variant, vtt_key, source_provider, archived_at FROM episode_thumbnails WHERE anime_id = ? AND episode = ?`
+    ).all(String(animeId), String(episode));
+    const out = {};
+    for (const row of rows) {
+      out[row.variant] = {
+        vttKey: row.vtt_key,
+        sourceProvider: row.source_provider,
+        archivedAt: row.archived_at,
+      };
+    }
+    return out;
+  } catch (e) {
+    console.warn("[cache] getEpisodeThumbnails error:", e.message);
+    return {};
   }
 }
 

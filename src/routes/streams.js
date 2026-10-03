@@ -1,7 +1,7 @@
 import { Router } from "express";
 import fs from "fs";
 import { STREAM_TTL, REANIME_STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
-import { cacheGet, cacheSet, cacheDelete, timed, getR2Archive, getManualTracks } from "../lib/cache.js";
+import { cacheGet, cacheSet, cacheDelete, timed, getR2Archive, getManualTracks, getEpisodeThumbnails, upsertEpisodeThumbnail } from "../lib/cache.js";
 import { buildSignedR2Url } from "../lib/r2-seal.js";
 import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { isR2Configured } from "../lib/hls-to-r2.js";
@@ -171,7 +171,11 @@ function buildReanimeSubtitleFallbackTrack(track, proxyBase) {
   return { ...rest, url: proxyUrl };
 }
 
-function enqueueReanimeSidecarArchive({ reanime, reanimeCacheKey, respKey }) {
+function isDubLikeLang(lang) {
+  return /DUB|LAT/.test(lang || "");
+}
+
+function enqueueReanimeSidecarArchive({ anilistId, episode, reanime, reanimeCacheKey, respKey }) {
   if (!isR2Configured() || !reanime || reanimeSidecarInflight.has(reanimeCacheKey)) return;
 
   const needsThumbs = [reanime?.sub, reanime?.dub].some((item) => item?.thumbnails_vtt && !item?.r2_thumbnail_vtt_key);
@@ -181,11 +185,18 @@ function enqueueReanimeSidecarArchive({ reanime, reanimeCacheKey, respKey }) {
   const job = Promise.resolve().then(async () => {
     let changed = false;
 
-    for (const item of [reanime?.sub, reanime?.dub]) {
+    for (const [item, variant] of [[reanime?.sub, "sub"], [reanime?.dub, "dub"]]) {
       if (!item?.thumbnails_vtt || item?.r2_thumbnail_vtt_key) continue;
-      const key = await archiveThumbnailVttToR2(item.thumbnails_vtt);
+      const key = await archiveThumbnailVttToR2(item.thumbnails_vtt, { animeId: anilistId, episode, variant });
       if (key) {
         item.r2_thumbnail_vtt_key = key;
+        upsertEpisodeThumbnail({
+          animeId: anilistId,
+          episode,
+          variant,
+          vttKey: key,
+          sourceProvider: item.server ? `reanime-${item.server}` : "reanime",
+        });
         changed = true;
       }
     }
@@ -221,6 +232,20 @@ function enqueueReanimeSidecarArchive({ reanime, reanimeCacheKey, respKey }) {
   });
 
   reanimeSidecarInflight.set(reanimeCacheKey, job);
+}
+
+function syncReanimeThumbnailMetadata(anilistId, episode, reanime) {
+  if (!anilistId || !episode || !reanime) return;
+  for (const [item, variant] of [[reanime?.sub, "sub"], [reanime?.dub, "dub"]]) {
+    if (!item?.r2_thumbnail_vtt_key) continue;
+    upsertEpisodeThumbnail({
+      animeId: anilistId,
+      episode,
+      variant,
+      vttKey: item.r2_thumbnail_vtt_key,
+      sourceProvider: item.server ? `reanime-${item.server}` : "reanime",
+    });
+  }
 }
 
 // ── Auto-archivado a R2 ──────────────────────────────────────────────────────
@@ -648,11 +673,15 @@ const R2_LANG_LABELS = {
 // primero en el array para quedar como "CPT CDN 1" de su idioma: no dependen
 // de que el provider original siga vivo. verifyKey estable por slug — la URL
 // firmada rota (exp en la firma) y sin esto el verify cache nunca pegaría.
-function buildZenkaiStreams(r2Archived) {
+function buildZenkaiStreams(r2Archived, episodeThumbnails = {}) {
   const out = [];
+  const subThumbnailKey = episodeThumbnails.sub?.vttKey ?? episodeThumbnails.dub?.vttKey ?? null;
+  const dubThumbnailKey = episodeThumbnails.dub?.vttKey ?? episodeThumbnails.sub?.vttKey ?? null;
   for (const [lang, entry] of Object.entries(r2Archived)) {
     try {
       const signedUrl = buildSignedR2Url(`${entry.slug}/master.m3u8`);
+      const thumbnailKey = isDubLikeLang(lang) ? dubThumbnailKey : subThumbnailKey;
+      const thumbnailUrl = thumbnailKey ? buildSignedR2Url(thumbnailKey) : null;
       // Mismo formato `skip` que usan los demás providers (ver makeAnimeStream):
       // { intro: [start,end], outro: [start,end] } en segundos.
       const skip = (entry.skipIntro || entry.skipOutro)
@@ -670,6 +699,7 @@ function buildZenkaiStreams(r2Archived) {
         proxy_url: signedUrl,
         verifyKey: `r2:${entry.slug}`,
         ...(skip && { skip }),
+        ...(thumbnailUrl && { thumbnailVtt: thumbnailUrl, thumbnailVttProxy: thumbnailUrl }),
       });
     } catch (e) {
       console.warn(`[anime] r2 archive ${lang} sin firmar: ${e.message}`);
@@ -711,9 +741,10 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   // scrapean. JAP-SUB nunca se archiva → sus providers corren siempre.
   // Si un zenkai falla verify, su lang queda descubierto y vuelve a scrapear.
   const r2Archived = getR2Archive(anilistId, episode);
+  let episodeThumbnails = getEpisodeThumbnails(anilistId, episode);
   const coveredLangs = new Set();
   if (Object.keys(r2Archived).length) {
-    const zenkaiStreams = buildZenkaiStreams(r2Archived);
+    const zenkaiStreams = buildZenkaiStreams(r2Archived, episodeThumbnails);
     if (zenkaiStreams.length) {
       const ok = await filterPlayableStreams(zenkaiStreams, { allowEmpty: true });
       for (const s of ok) coveredLangs.add(s.lang);
@@ -776,6 +807,10 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   }
 
   data.reanime = reanimeData;
+  if (reanimeData) {
+    syncReanimeThumbnailMetadata(anilistId, episode, reanimeData);
+    episodeThumbnails = getEpisodeThumbnails(anilistId, episode);
+  }
   const body = await coalesce(respKey, async () => {
     const cachedResp = cacheGet(respKey);
     if (cachedResp) return cachedResp;
@@ -783,11 +818,11 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniwaves, animeheaven, aniskip, reanime } = data;
     const tracksPromise = buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
     if (reanimeData) cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
-    if (reanimeData) enqueueReanimeSidecarArchive({ reanime: reanimeData, reanimeCacheKey, respKey });
+    if (reanimeData) enqueueReanimeSidecarArchive({ anilistId, episode, reanime: reanimeData, reanimeCacheKey, respKey });
 
     let streams = [];
 
-    streams.push(...buildZenkaiStreams(r2Archived));
+    streams.push(...buildZenkaiStreams(r2Archived, episodeThumbnails));
 
     const downloads = [];
 
@@ -943,7 +978,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
     autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase);
 
-    const isDubLang = (lang) => /DUB|LAT/.test(lang || "");
+    const isDubLang = (lang) => isDubLikeLang(lang);
     const megaplayDubSkip = megaplayDub && Object.keys(megaplayDub.skip || {}).length ? megaplayDub.skip : null;
     const megaplaySubSkip = megaplaySub && Object.keys(megaplaySub.skip || {}).length ? megaplaySub.skip : null;
     const reanimeSkipOf = (item) => {

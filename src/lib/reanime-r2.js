@@ -12,6 +12,23 @@ function sha1(value) {
   return crypto.createHash("sha1").update(value).digest("hex");
 }
 
+function sanitizePathPart(value, fallback = "unknown") {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || fallback;
+}
+
+export function buildEpisodeThumbnailPrefix(animeId, episode, variant = "sub") {
+  return `thumbs/anime/${sanitizePathPart(animeId)}/${sanitizePathPart(episode)}/${sanitizePathPart(variant)}`;
+}
+
+export function buildEpisodeThumbnailVttKey(animeId, episode, variant = "sub") {
+  return `${buildEpisodeThumbnailPrefix(animeId, episode, variant)}/thumbs.vtt`;
+}
+
 function withOriginHeaders(referer) {
   return {
     "User-Agent": UA,
@@ -183,11 +200,14 @@ function buildSignedSiblingRef(objectKey, fragment = "", ttlSeconds = 86400) {
   return `${filename}?exp=${exp}&sig=${sig}${fragment}`;
 }
 
-export async function archiveThumbnailVttToR2(vttUrl, referer = FLIXCLOUD_REFERER) {
+export async function archiveThumbnailVttToR2(vttUrl, { animeId = null, episode = null, variant = "sub", referer = FLIXCLOUD_REFERER } = {}) {
   if (!vttUrl || !isR2Configured()) return null;
 
   try {
     const baseHash = sha1(vttUrl);
+    const targetPrefix = (animeId && episode)
+      ? buildEpisodeThumbnailPrefix(animeId, episode, variant)
+      : `thumbs/reanime-${baseHash}`;
     const { buffer } = await fetchBuffer(vttUrl, referer, 15000, "text/vtt");
     let text = buffer.toString("utf8");
     if (!text.startsWith("WEBVTT")) throw new Error("thumbnail VTT inválido");
@@ -202,7 +222,7 @@ export async function archiveThumbnailVttToR2(vttUrl, referer = FLIXCLOUD_REFERE
         throw new Error(`thumbnail asset fuera de base permitida: ${absoluteUrl}`);
       }
       const ext = absoluteUrl.match(/\.(webp|jpg|jpeg|png)(?=$|[?#])/i)?.[1]?.toLowerCase() || "webp";
-      const spriteKey = `thumbs/reanime-${baseHash}/sprite-${sha1(absoluteUrl)}.${ext}`;
+      const spriteKey = `${targetPrefix}/sprite-${sha1(absoluteUrl)}.${ext}`;
       const contentType = inferImageContentType(absoluteUrl);
       const { buffer: spriteBuffer } = await fetchBuffer(absoluteUrl, referer, 15000, contentType);
       await uploadIfMissing(spriteKey, spriteBuffer, inferImageContentType(absoluteUrl));
@@ -214,7 +234,7 @@ export async function archiveThumbnailVttToR2(vttUrl, referer = FLIXCLOUD_REFERE
       return spriteKey ? buildSignedSiblingRef(spriteKey, fragment) : match;
     });
 
-    const vttKey = `thumbs/reanime-${baseHash}/thumbs.vtt`;
+    const vttKey = `${targetPrefix}/thumbs.vtt`;
     await uploadIfMissing(vttKey, Buffer.from(text, "utf8"), "text/vtt; charset=utf-8");
     return vttKey;
   } catch (error) {
