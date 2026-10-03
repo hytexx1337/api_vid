@@ -8,6 +8,7 @@ const FLIX = "https://flixcloud.cc";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
 const H = { "User-Agent": UA, Accept: "application/json, */*" };
 const REANIME_DEBUG = /^(1|true|yes|on)$/i.test(process.env.REANIME_DEBUG || "");
+const seriesInFlight = new Map();
 
 function dbg(message, extra = null) {
   if (!REANIME_DEBUG) return;
@@ -87,88 +88,99 @@ async function resolveSeries(anilistId) {
     return cached;
   }
 
-  const media = await fetchAnilistMedia(anilistId);
-  const malId = media?.idMal ?? null;
-  const queries = buildTitles(media).slice(0, 5);
-  dbg("resolveSeries start", { anilistId, malId, queries });
-
-  const candidates = new Map();
-  await Promise.all(queries.map(async (q) => {
-    for (const r of await searchReanime(q).catch(() => [])) {
-      if (r?.anime_id && !candidates.has(r.anime_id)) candidates.set(r.anime_id, r);
-    }
-  }));
-  dbg("resolveSeries candidates", { anilistId, count: candidates.size, ids: [...candidates.keys()].slice(0, 10) });
-
-  for (const [id, r] of candidates) {
-    const coverId = extractAnilistIdFromCover(r.cover_image);
-    if (coverId && coverId === Number(anilistId)) {
-      const data = {
-        animeId: id,
-        title: r.title?.english || r.title?.romaji || id,
-        anilistId: Number(anilistId),
-        subbed: Number.isFinite(r.subbed) ? r.subbed : null,
-        dubbed: Number.isFinite(r.dubbed) ? r.dubbed : null,
-      };
-      dbg("resolveSeries matched by cover", { anilistId, animeId: id, title: data.title });
-      cacheSet(cacheKey, data, PROVIDER_TTL);
-      return data;
-    }
+  if (seriesInFlight.has(cacheKey)) {
+    dbg("resolveSeries in-flight hit", { anilistId, cacheKey });
+    return seriesInFlight.get(cacheKey);
   }
 
-  const needsDetail = [...candidates.keys()].filter(
-    (id) => extractAnilistIdFromCover(candidates.get(id)?.cover_image) === null
-  );
-  const details = await Promise.all(
-    needsDetail.map(async (id) => ({ id, detail: await fetchAnimeDetail(id).catch(() => null) }))
-  );
-  dbg("resolveSeries details fetched", { anilistId, count: details.length });
+  const run = (async () => {
+    const media = await fetchAnilistMedia(anilistId);
+    const malId = media?.idMal ?? null;
+    const queries = buildTitles(media).slice(0, 5);
+    dbg("resolveSeries start", { anilistId, malId, queries });
 
-  for (const { id, detail } of details) {
-    if (detail?.anilist_id && Number(detail.anilist_id) === Number(anilistId)) {
-      const data = {
-        animeId: id,
-        title: detail.title?.english || detail.title?.romaji || candidates.get(id)?.title?.english || id,
-        anilistId: Number(anilistId),
-        subbed: Number.isFinite(detail.subbed) ? detail.subbed : null,
-        dubbed: Number.isFinite(detail.dubbed) ? detail.dubbed : null,
-      };
-      dbg("resolveSeries matched by detail anilist_id", { anilistId, animeId: id, title: data.title });
-      cacheSet(cacheKey, data, PROVIDER_TTL);
-      return data;
+    const candidates = new Map();
+    for (const q of queries) {
+      for (const r of await searchReanime(q).catch(() => [])) {
+        if (r?.anime_id && !candidates.has(r.anime_id)) candidates.set(r.anime_id, r);
+      }
     }
-  }
+    dbg("resolveSeries candidates", { anilistId, count: candidates.size, ids: [...candidates.keys()].slice(0, 10) });
 
-  if (malId) {
-    for (const { id, detail } of details) {
-      const detailMal = detail?.mal_id;
-      if (detailMal && Number(detailMal) === Number(malId)) {
+    for (const [id, r] of candidates) {
+      const coverId = extractAnilistIdFromCover(r.cover_image);
+      if (coverId && coverId === Number(anilistId)) {
         const data = {
           animeId: id,
-          title: detail.title?.english || detail.title?.romaji || id,
+          title: r.title?.english || r.title?.romaji || id,
           anilistId: Number(anilistId),
-          subbed: Number.isFinite(detail.subbed) ? detail.subbed : null,
-          dubbed: Number.isFinite(detail.dubbed) ? detail.dubbed : null,
+          subbed: Number.isFinite(r.subbed) ? r.subbed : null,
+          dubbed: Number.isFinite(r.dubbed) ? r.dubbed : null,
         };
-      dbg("resolveSeries matched by mal_id", { anilistId, animeId: id, malId, title: data.title });
+        dbg("resolveSeries matched by cover", { anilistId, animeId: id, title: data.title });
         cacheSet(cacheKey, data, PROVIDER_TTL);
         return data;
       }
     }
-  }
-  dbg("resolveSeries no match", { anilistId, malId, candidateIds: [...candidates.keys()] });
 
-  throw new Error(`No confirmed reanime match for AniList ${anilistId}`);
+    const needsDetail = [...candidates.keys()].filter(
+      (id) => extractAnilistIdFromCover(candidates.get(id)?.cover_image) === null
+    );
+    const details = await Promise.all(
+      needsDetail.map(async (id) => ({ id, detail: await fetchAnimeDetail(id).catch(() => null) }))
+    );
+    dbg("resolveSeries details fetched", { anilistId, count: details.length });
+
+    for (const { id, detail } of details) {
+      if (detail?.anilist_id && Number(detail.anilist_id) === Number(anilistId)) {
+        const data = {
+          animeId: id,
+          title: detail.title?.english || detail.title?.romaji || candidates.get(id)?.title?.english || id,
+          anilistId: Number(anilistId),
+          subbed: Number.isFinite(detail.subbed) ? detail.subbed : null,
+          dubbed: Number.isFinite(detail.dubbed) ? detail.dubbed : null,
+        };
+        dbg("resolveSeries matched by detail anilist_id", { anilistId, animeId: id, title: data.title });
+        cacheSet(cacheKey, data, PROVIDER_TTL);
+        return data;
+      }
+    }
+
+    if (malId) {
+      for (const { id, detail } of details) {
+        const detailMal = detail?.mal_id;
+        if (detailMal && Number(detailMal) === Number(malId)) {
+          const data = {
+            animeId: id,
+            title: detail.title?.english || detail.title?.romaji || id,
+            anilistId: Number(anilistId),
+            subbed: Number.isFinite(detail.subbed) ? detail.subbed : null,
+            dubbed: Number.isFinite(detail.dubbed) ? detail.dubbed : null,
+          };
+          dbg("resolveSeries matched by mal_id", { anilistId, animeId: id, malId, title: data.title });
+          cacheSet(cacheKey, data, PROVIDER_TTL);
+          return data;
+        }
+      }
+    }
+    dbg("resolveSeries no match", { anilistId, malId, candidateIds: [...candidates.keys()] });
+    throw new Error(`No confirmed reanime match for AniList ${anilistId}`);
+  })().finally(() => {
+    seriesInFlight.delete(cacheKey);
+  });
+
+  seriesInFlight.set(cacheKey, run);
+  return run;
 }
 
 const SERVER_PRIORITY = { "HD-2": 0, "HD-1": 1 };
 const sortByPriority = (arr) => arr.slice().sort((a, b) => (SERVER_PRIORITY[a.serverName] ?? 9) - (SERVER_PRIORITY[b.serverName] ?? 9));
 
-async function resolveReanimeStream(anilistId, audio, ep) {
+async function resolveReanimeStream(anilistId, audio, ep, series = null) {
   dbg("resolveReanimeStream start", { anilistId, audio, episode: ep });
-  const series = await resolveSeries(anilistId);
-  const slug = series.animeId;
-  dbg("resolveReanimeStream series resolved", { anilistId, audio, episode: ep, slug, title: series.title });
+  const resolvedSeries = series || await resolveSeries(anilistId);
+  const slug = resolvedSeries.animeId;
+  dbg("resolveReanimeStream series resolved", { anilistId, audio, episode: ep, slug, title: resolvedSeries.title });
 
   const [watchRes, flixRes] = await Promise.allSettled([
     fetchReanime(`${BASE}/api/watch/${slug}/${ep}`, { headers: H, timeoutMs: 20000 }).then((r) => {
@@ -236,7 +248,7 @@ async function resolveReanimeStream(anilistId, audio, ep) {
         hasThumbs: Boolean(stream.thumbnails_vtt),
       });
       return {
-        title: series.title,
+        title: resolvedSeries.title,
         slug,
         server: server.serverName,
         url: stream.url,
@@ -270,9 +282,10 @@ async function resolveReanimeStream(anilistId, audio, ep) {
 export async function getReanimeStreams(anilistId, episode) {
   const ep = parseInt(episode);
   dbg("getReanimeStreams start", { anilistId, episode: ep });
+  const series = await resolveSeries(anilistId);
   const [subResult, dubResult] = await Promise.allSettled([
-    resolveReanimeStream(anilistId, "sub", ep),
-    resolveReanimeStream(anilistId, "dub", ep),
+    resolveReanimeStream(anilistId, "sub", ep, series),
+    resolveReanimeStream(anilistId, "dub", ep, series),
   ]);
   dbg("getReanimeStreams result", {
     anilistId,

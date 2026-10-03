@@ -1,0 +1,197 @@
+0|api-vid-node  | [reanime] getReanimeStreams start { anilistId: '178789', episode: 11 }
+0|api-vid-node  | [reanime] resolveReanimeStream start { anilistId: '178789', audio: 'sub', episode: 11 }
+0|api-vid-node  | [reanime] fetchAnilistMedia start { anilistId: '178789' }
+0|api-vid-node  | [reanime:http] direct/proxy request:start {
+0|api-vid-node  |   method: 'POST',
+0|api-vid-node  |   target: 'https://graphql.anilist.co',
+0|api-vid-node  |   viaProxy: false
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] resolveReanimeStream start { anilistId: '178789', audio: 'dub', episode: 11 }
+0|api-vid-node  | [reanime] fetchAnilistMedia start { anilistId: '178789' }
+0|api-vid-node  | [reanime:http] direct/proxy request:start {
+0|api-vid-node  |   method: 'POST',
+0|api-vid-node  |   target: 'https://graphql.anilist.co',
+0|api-vid-node  |   viaProxy: false
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] direct/proxy request:end {
+0|api-vid-node  |   method: 'POST',
+0|api-vid-node  |   target: 'https://graphql.anilist.co',
+0|api-vid-node  |   viaProxy: false,
+0|api-vid-node  |   status: 200,
+0|api-vid-node  |   ms: 90,
+0|api-vid-node  |   contentType: 'application/json'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] direct/proxy request:end {
+0|api-vid-node  |   method: 'POST',
+0|api-vid-node  |   target: 'https://graphql.anilist.co',
+0|api-vid-node  |   viaProxy: false,
+0|api-vid-node  |   status: 200,
+0|api-vid-node  |   ms: 91,
+0|api-vid-node  |   contentType: 'application/json'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] fetchAnilistMedia ok { anilistId: '178789', idMal: 59193, synonyms: 3 }
+0|api-vid-node  | [reanime] resolveSeries start {
+0|api-vid-node  |   anilistId: '178789',
+0|api-vid-node  |   malId: 59193,
+0|api-vid-node  |   queries: [
+0|api-vid-node  |     'Mushoku Tensei: Jobless Reincarnation Season 3',
+0|api-vid-node  |     'Mushoku Tensei III: Isekai Ittara Honki Dasu',
+0|api-vid-node  |     '無職転生Ⅲ ～異世界行ったら本気だす～',
+0|api-vid-node  |     '無職転生 ～異世界行ったら本気だす～ 第3期',
+0|api-vid-node  |     'Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season'
+0|api-vid-node  |   ]
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: 'Mushoku Tensei: Jobless Reincarnation Season 3' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei%3A+Jobless+Reincarnation+Season+3&limit=10',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3DMushoku%2BTensei%253A%2BJobless%2BReincarnation%2BSeason%2B3%26limit%...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: 'Mushoku Tensei III: Isekai Ittara Honki Dasu' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei+III%3A+Isekai+Ittara+Honki+Dasu&limit=10',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3DMushoku%2BTensei%2BIII%253A%2BIsekai%2BIttara%2BHonki%2BDasu%26limit%...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: '無職転生Ⅲ ～異世界行ったら本気だす～' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=%E7%84%A1%E8%81%B7%E8%BB%A2%E7%94%9F%E2%85%A2+%EF%BD%9E%E7%95%B0%E4%B8%96%E7%95%8C%E8%A1%8C%E3%81%A3%E3%81%9F%E3%82%89%E6%9C%AC%E6%B0%97%E3%81...',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3D%25E7%2584%25A1%25E8%2581%25B7%25E8%25BB%25A2%25E7%2594%259F%25E2%258...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: '無職転生 ～異世界行ったら本気だす～ 第3期' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=%E7%84%A1%E8%81%B7%E8%BB%A2%E7%94%9F+%EF%BD%9E%E7%95%B0%E4%B8%96%E7%95%8C%E8%A1%8C%E3%81%A3%E3%81%9F%E3%82%89%E6%9C%AC%E6%B0%97%E3%81%A0%E3%81...',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3D%25E7%2584%25A1%25E8%2581%25B7%25E8%25BB%25A2%25E7%2594%259F%2B%25EF%...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: 'Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei%3A+Isekai+Ittara+Honki+Dasu+3rd+Season&limit=10',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3DMushoku%2BTensei%253A%2BIsekai%2BIttara%2BHonki%2BDasu%2B3rd%2BSeason...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] fetchAnilistMedia ok { anilistId: '178789', idMal: 59193, synonyms: 3 }
+0|api-vid-node  | [reanime] resolveSeries start {
+0|api-vid-node  |   anilistId: '178789',
+0|api-vid-node  |   malId: 59193,
+0|api-vid-node  |   queries: [
+0|api-vid-node  |     'Mushoku Tensei: Jobless Reincarnation Season 3',
+0|api-vid-node  |     'Mushoku Tensei III: Isekai Ittara Honki Dasu',
+0|api-vid-node  |     '無職転生Ⅲ ～異世界行ったら本気だす～',
+0|api-vid-node  |     '無職転生 ～異世界行ったら本気だす～ 第3期',
+0|api-vid-node  |     'Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season'
+0|api-vid-node  |   ]
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: 'Mushoku Tensei: Jobless Reincarnation Season 3' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei%3A+Jobless+Reincarnation+Season+3&limit=10',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3DMushoku%2BTensei%253A%2BJobless%2BReincarnation%2BSeason%2B3%26limit%...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: 'Mushoku Tensei III: Isekai Ittara Honki Dasu' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei+III%3A+Isekai+Ittara+Honki+Dasu&limit=10',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3DMushoku%2BTensei%2BIII%253A%2BIsekai%2BIttara%2BHonki%2BDasu%26limit%...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: '無職転生Ⅲ ～異世界行ったら本気だす～' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=%E7%84%A1%E8%81%B7%E8%BB%A2%E7%94%9F%E2%85%A2+%EF%BD%9E%E7%95%B0%E4%B8%96%E7%95%8C%E8%A1%8C%E3%81%A3%E3%81%9F%E3%82%89%E6%9C%AC%E6%B0%97%E3%81...',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3D%25E7%2584%25A1%25E8%2581%25B7%25E8%25BB%25A2%25E7%2594%259F%25E2%258...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: '無職転生 ～異世界行ったら本気だす～ 第3期' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=%E7%84%A1%E8%81%B7%E8%BB%A2%E7%94%9F+%EF%BD%9E%E7%95%B0%E4%B8%96%E7%95%8C%E8%A1%8C%E3%81%A3%E3%81%9F%E3%82%89%E6%9C%AC%E6%B0%97%E3%81%A0%E3%81...',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3D%25E7%2584%25A1%25E8%2581%25B7%25E8%25BB%25A2%25E7%2594%259F%2B%25EF%...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] searchReanime start { query: 'Mushoku Tensei: Isekai Ittara Honki Dasu 3rd Season' }
+0|api-vid-node  | [reanime:http] worker request:start {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei%3A+Isekai+Ittara+Honki+Dasu+3rd+Season&limit=10',
+0|api-vid-node  |   workerUrl: 'https://flixcloud-proxy.zenkai1337.workers.dev/fetch?url=https%3A%2F%2Freanime.to%2Fapi%2Fv1%2Fsearch%3Fq%3DMushoku%2BTensei%253A%2BIsekai%2BIttara%2BHonki%2BDasu%2B3rd%2BSeason...'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei%3A+Jobless+Reincarnation+Season+3&limit=10',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 101,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei+III%3A+Isekai+Ittara+Honki+Dasu&limit=10',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 91,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=%E7%84%A1%E8%81%B7%E8%BB%A2%E7%94%9F+%EF%BD%9E%E7%95%B0%E4%B8%96%E7%95%8C%E8%A1%8C%E3%81%A3%E3%81%9F%E3%82%89%E6%9C%AC%E6%B0%97%E3%81%A0%E3%81...',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 97,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=%E7%84%A1%E8%81%B7%E8%BB%A2%E7%94%9F%E2%85%A2+%EF%BD%9E%E7%95%B0%E4%B8%96%E7%95%8C%E8%A1%8C%E3%81%A3%E3%81%9F%E3%82%89%E6%9C%AC%E6%B0%97%E3%81...',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 103,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei%3A+Jobless+Reincarnation+Season+3&limit=10',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 98,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=%E7%84%A1%E8%81%B7%E8%BB%A2%E7%94%9F+%EF%BD%9E%E7%95%B0%E4%B8%96%E7%95%8C%E8%A1%8C%E3%81%A3%E3%81%9F%E3%82%89%E6%9C%AC%E6%B0%97%E3%81%A0%E3%81...',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 95,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei%3A+Isekai+Ittara+Honki+Dasu+3rd+Season&limit=10',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 103,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=%E7%84%A1%E8%81%B7%E8%BB%A2%E7%94%9F%E2%85%A2+%EF%BD%9E%E7%95%B0%E4%B8%96%E7%95%8C%E8%A1%8C%E3%81%A3%E3%81%9F%E3%82%89%E6%9C%AC%E6%B0%97%E3%81...',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 107,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] resolveSeries candidates { anilistId: '178789', count: 0, ids: [] }
+0|api-vid-node  | [reanime] resolveSeries details fetched { anilistId: '178789', count: 0 }
+0|api-vid-node  | [reanime] resolveSeries no match { anilistId: '178789', malId: 59193, candidateIds: [] }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei%3A+Isekai+Ittara+Honki+Dasu+3rd+Season&limit=10',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 114,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime:http] worker request:end {
+0|api-vid-node  |   method: 'GET',
+0|api-vid-node  |   target: 'https://reanime.to/api/v1/search?q=Mushoku+Tensei+III%3A+Isekai+Ittara+Honki+Dasu&limit=10',
+0|api-vid-node  |   status: 403,
+0|api-vid-node  |   ms: 123,
+0|api-vid-node  |   contentType: 'text/html; charset=UTF-8'
+0|api-vid-node  | }
+0|api-vid-node  | [reanime] resolveSeries candidates { anilistId: '178789', count: 0, ids: [] }
+0|api-vid-node  | [reanime] resolveSeries details fetched { anilistId: '178789', count: 0 }
+0|api-vid-node  | [reanime] resolveSeries no match { anilistId: '178789', malId: 59193, candidateIds: [] }
+0|api-vid-node  | [reanime] getReanimeStreams result {
+0|api-vid-node  |   anilistId: '178789',
+0|api-vid-node  |   episode: 11,
+0|api-vid-node  |   sub: { ok: false, error: 'No confirmed reanime match for AniList 178789' },
+0|api-vid-node  |   dub: { ok: false, error: 'No confirmed reanime match for AniList 178789' }
+0|api-vid-node  | }
