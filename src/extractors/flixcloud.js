@@ -2,13 +2,6 @@ import { webcrypto as crypto } from "node:crypto";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
-const REANIME_DEBUG = /^(1|true|yes|on)$/i.test(process.env.REANIME_DEBUG || "");
-
-function dbg(message, data) {
-  if (!REANIME_DEBUG) return;
-  if (data === undefined) console.log(`[reanime:flixcloud] ${message}`);
-  else console.log(`[reanime:flixcloud] ${message}`, data);
-}
 
 async function sha256hex(value) {
   const bytes = await crypto.subtle.digest("SHA-256", typeof value === "string" ? encoder.encode(value) : value);
@@ -323,7 +316,6 @@ async function runDecryptWasm(wasmBytes, fragment, keyFragment, token, seed) {
 }
 
 export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase = "https://flixcloud.cc", headers = {}, referer } = {}) {
-  dbg("extract start", { apiBase, hasReferer: Boolean(referer), htmlLength: embedHtml?.length ?? 0 });
   const data = parseJsLiteral(extractSsrObj(embedHtml));
   const seed = data.obfuscation_seed;
   if (!seed) {
@@ -371,22 +363,13 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
     error.debug = { fields, topKeys: Object.keys(data).slice(0, 20) };
     throw error;
   }
-  dbg("token api start", {
-    apiBase,
-    tokenSuffix: token.slice(-8),
-    videoId: data.video_id ?? null,
-    subtitles: data.subtitles?.length ?? 0,
-    thumbnails: Boolean(data.thumbnails_vtt),
-  });
   const tokenResponse = await fetchImpl(`${apiBase}/api/m3u8/${token}`, { headers: { ...headers, ...(referer ? { Referer: referer } : {}) } });
   if (!tokenResponse.ok) {
     const error = new Error(`Token API ${tokenResponse.status}`);
     error.rawBody = await tokenResponse.text().catch(() => null);
-    dbg("token api error", { status: tokenResponse.status, tokenSuffix: token.slice(-8) });
     throw error;
   }
   const tokenData = await tokenResponse.json();
-  dbg("token api ok", { status: tokenResponse.status, tokenSuffix: token.slice(-8), keys: Object.keys(tokenData).length });
   const videoKey = (await sha256hex(token + "vid")).substring(0, 10);
   const tokenKey = (await sha256hex(token + "key")).substring(0, 10);
   const videoBytes = b64toU8(tokenData[videoKey]);
@@ -434,11 +417,6 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
   }
   const url = decoder.decode(plain).trim().replace(/\0+$/, "");
   if (!url.startsWith("http")) throw new Error(`Unexpected decrypted value: ${url.substring(0, 60)}`);
-  dbg("extract ok", {
-    tokenSuffix: token.slice(-8),
-    urlHost: (() => { try { return new URL(url).host; } catch { return null; } })(),
-    hasManifestKey: Boolean(manifestKey),
-  });
   return {
     url,
     subtitles: data.subtitles ?? [],

@@ -1,4 +1,5 @@
 import { createDecipheriv } from "crypto";
+import fs from "fs";
 import { ANILIST_HEADERS } from "../config/constants.js";
 
 const ANIMEAV1_BASE = "https://animeav1.com/media";
@@ -103,6 +104,53 @@ async function upnShareToM3U8(embedUrl, attempt = 0) {
 // ── Cache ────────────────────────────────────────────────────────────────────
 
 const scraperCache = new Map();
+const scraperInflight = new Map();
+
+// #region debug-point B:animeav1-debug-helper
+let animeAv1DebugConfig = null;
+function reportAnimeAv1Debug(hypothesisId, location, msg, data = {}) {
+  if (process.env.REANIME_DEBUG !== "1") return;
+  try {
+    if (!animeAv1DebugConfig) {
+      let url = "http://127.0.0.1:7777/event";
+      let sessionId = "api-cache-capacity";
+      try {
+        const env = fs.readFileSync(".dbg/api-cache-capacity.env", "utf8");
+        url = env.match(/DEBUG_SERVER_URL=(.+)/)?.[1]?.trim() || url;
+        sessionId = env.match(/DEBUG_SESSION_ID=(.+)/)?.[1]?.trim() || sessionId;
+      } catch {}
+      animeAv1DebugConfig = { url, sessionId };
+    }
+    fetch(animeAv1DebugConfig.url, {
+      method: "POST",
+      body: JSON.stringify({
+        sessionId: animeAv1DebugConfig.sessionId,
+        runId: "pre-fix",
+        hypothesisId,
+        location,
+        msg,
+        data,
+        ts: Date.now(),
+      }),
+    }).catch(() => {});
+  } catch {}
+}
+// #endregion
+
+function coalesceScrape(key, fn) {
+  if (!scraperInflight.has(key)) {
+    // #region debug-point C:scraper-coalesce-create
+    reportAnimeAv1Debug("C", "src/providers/scraper.js:coalesceScrape:new", "[DEBUG] animeav1 coalesce create", { key });
+    // #endregion
+    const job = Promise.resolve().then(fn).finally(() => scraperInflight.delete(key));
+    scraperInflight.set(key, job);
+  } else {
+    // #region debug-point C:scraper-coalesce-join
+    reportAnimeAv1Debug("C", "src/providers/scraper.js:coalesceScrape:join", "[DEBUG] animeav1 coalesce join", { key });
+    // #endregion
+  }
+  return scraperInflight.get(key);
+}
 
 function cacheGet(key) {
   const entry = scraperCache.get(key);
@@ -118,6 +166,10 @@ function cacheSet(key, value, ttlMs) {
 // ── AniList ID → título + MAL ID (directo desde AniList, sin Jikan ni ani.zip) ─
 
 export async function getAnilistInfo(anilistId) {
+  return coalesceScrape(`alinfo:${anilistId}`, () => resolveAnilistInfo(anilistId));
+}
+
+async function resolveAnilistInfo(anilistId) {
   const key = `alinfo:${anilistId}`;
   const cached = cacheGet(key);
   if (cached) return cached;
@@ -186,7 +238,25 @@ function normalizeTitle(t) {
   return t.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
+let activeSearches = 0;
+const searchWaiters = [];
+
 async function searchAnimeav1(query) {
+  return coalesceScrape(`search:${query}`, async () => {
+    // Global al proceso: distintos episodios tambien comparten este limite.
+    if (activeSearches >= 2) await new Promise(resolve => searchWaiters.push(resolve));
+    else activeSearches++;
+    try {
+      return await fetchAnimeav1Search(query);
+    } finally {
+      const next = searchWaiters.shift();
+      if (next) next();
+      else activeSearches--;
+    }
+  });
+}
+
+async function fetchAnimeav1Search(query) {
   const r = await fetch("https://animeav1.com/api/search", {
     method: "POST",
     headers: { ...PAGE_HEADERS, "Content-Type": "application/json", "Accept": "application/json" },
@@ -312,12 +382,25 @@ function pickBestSlug(entries, titles, anilistYear = null) {
 // titleRomaji/titleEnglish: si se pasan, se omite Jikan.
 // Intenta romaji primero (los slugs de animeav1 usan romaji), luego inglés como fallback.
 export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null, anilistYear = null) {
+  const key = JSON.stringify(["slug", malId, titleRomaji, titleEnglish, anilistYear]);
+  return coalesceScrape(key, () => resolveMalIdToSlug(malId, titleRomaji, titleEnglish, anilistYear));
+}
+
+async function resolveMalIdToSlug(malId, titleRomaji, titleEnglish, anilistYear) {
   // slug3: pool combinado de todas las queries + desambiguación por números
   // del título — las entradas viejas pueden tener slugs erróneos cacheados
   // (ej. Evangelion 1.0 → "shin-evangelion-movie" por empate de Jaccard).
   const key = `slug3:${malId}`;
   const cached = cacheGet(key);
-  if (cached) return cached;
+  if (cached) {
+    // #region debug-point A:slug-cache-hit
+    reportAnimeAv1Debug("A", "src/providers/scraper.js:resolveMalIdToSlug:hit", "[DEBUG] animeav1 slug cache hit", { key, malId, slug: cached });
+    // #endregion
+    return cached;
+  }
+  // #region debug-point A:slug-cache-miss
+  reportAnimeAv1Debug("A", "src/providers/scraper.js:resolveMalIdToSlug:miss", "[DEBUG] animeav1 slug cache miss", { key, malId, anilistYear, titleRomaji, titleEnglish });
+  // #endregion
 
   const titleCandidates = [titleRomaji, titleEnglish].filter(Boolean);
 
@@ -382,8 +465,15 @@ export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null
     });
   };
 
-  let lastError;
-  for (const malTitle of titleCandidates) {
+  // Memo local: una query repetida entre variantes no vuelve a salir a la red.
+  const searches = new Map();
+  const search = (query) => {
+    if (!searches.has(query)) searches.set(query, searchAnimeav1(query));
+    return searches.get(query);
+  };
+  const titleResults = await Promise.all(titleCandidates.map(async (malTitle) => {
+    const batches = [];
+    let narrowTop = null;
     try {
       // Usar el título hasta el primer ":" como query de búsqueda.
       // Si el split en ":" da menos de 4 chars (ej: "Re" de "Re:Zero"),
@@ -394,34 +484,42 @@ export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null
         ? splitColon
         : malTitle.replace(/\b\d+(?:st|nd|rd|th)\s+season\b/gi, "").replace(/[!]/g, "").trim();
 
-      const results = await searchAnimeav1(keywords);
+      const results = await search(keywords);
       console.log(`[scraper] search "${keywords}" → ${results.map(r => r.slug).join(", ") || "(sin resultados)"}`);
-      addResults(results);
+      batches.push(results);
 
       // Con títulos que tienen ":", la query corta ("Rurouni Kenshin") puede
       // no devolver la entrada exacta — buscar también con el título completo.
       if (malTitle.includes(":") && keywords !== malTitle) {
-        addResults(await searchAnimeav1(malTitle).catch(() => []));
+        batches.push(await search(malTitle).catch(() => []));
       }
 
       // Query acotada con la parte DESPUÉS de los ":" — distingue
       // especiales/películas. Si devuelve pocos resultados, el top del
       // ranking es confiable como fallback.
       if (afterColon.length >= 4) {
-        const narrow = await searchAnimeav1(afterColon).catch(() => []);
-        addResults(narrow);
+        const narrow = await search(afterColon).catch(() => []);
+        batches.push(narrow);
         if (narrow.length > 0 && narrow.length <= 2) narrowTop = narrow[0].slug;
       }
+      return { batches, narrowTop };
     } catch (e) {
-      lastError = e;
+      return { batches, narrowTop, error: e };
     }
+  }));
+  // Combinar en orden original, nunca por orden de llegada: preserva desempates.
+  let lastError;
+  for (const result of titleResults) {
+    for (const batch of result.batches) addResults(batch);
+    if (result.narrowTop) narrowTop = result.narrowTop;
+    if (result.error) lastError = result.error;
   }
 
   const entries = [...pool.values()];
   const ranked = pickBestSlug(entries, titleCandidates, anilistYear);
   // La query específica (parte después de ":") es un candidato extra cuando
   // devolvió pocos resultados — su top de ranking es confiable.
-  const candidates = [...ranked];
+  const candidates = [...(ranked ?? [])];
   if (narrowTop && !candidates.includes(narrowTop)) candidates.push(narrowTop);
 
   // Verificación por año: el media page de animeav1 muestra el año en un
@@ -444,6 +542,9 @@ export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null
   if (slug) {
     console.log(`[scraper] malId=${malId} → slug="${slug}" (de ${entries.length} candidatos)`);
     cacheSet(key, slug, 7 * 24 * 60 * 60 * 1000);
+    // #region debug-point B:slug-selected
+    reportAnimeAv1Debug("B", "src/providers/scraper.js:resolveMalIdToSlug:selected", "[DEBUG] animeav1 slug resolved", { key, malId, slug, candidateCount: entries.length });
+    // #endregion
     return slug;
   }
   lastError ??= Object.assign(new Error(`No match for "${titleCandidates[0]}" in animeav1 search`), { status: 404 });
@@ -612,7 +713,15 @@ function extractDownloadLinks(html) {
 async function scrapeM3U8(slug, episode) {
   const cacheKey = `m3u8:${slug}:${episode}`;
   const cached = cacheGet(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    // #region debug-point A:scrape-cache-hit
+    reportAnimeAv1Debug("A", "src/providers/scraper.js:scrapeM3U8:hit", "[DEBUG] animeav1 stream cache hit", { cacheKey, slug, episode, streamCount: cached?.streams?.length ?? 0 });
+    // #endregion
+    return cached;
+  }
+  // #region debug-point A:scrape-cache-miss
+  reportAnimeAv1Debug("A", "src/providers/scraper.js:scrapeM3U8:miss", "[DEBUG] animeav1 stream cache miss", { cacheKey, slug, episode });
+  // #endregion
 
   const epNum = parseInt(episode);
 
@@ -746,6 +855,9 @@ async function scrapeM3U8(slug, episode) {
   const result = { streams, downloads };
   cacheSet(cacheKey, result, streamsTtl);
   if (usedEp !== epNum) cacheSet(`m3u8:${slug}:${usedEp}`, result, streamsTtl);
+  // #region debug-point B:scrape-result
+  reportAnimeAv1Debug("B", "src/providers/scraper.js:scrapeM3U8:done", "[DEBUG] animeav1 scrape result", { cacheKey, slug, requestedEpisode: epNum, usedEpisode: usedEp, streamCount: streams.length, downloadCount: (downloads?.sub?.length ?? 0) + (downloads?.dub?.length ?? 0) });
+  // #endregion
   return result;
 }
 
@@ -761,9 +873,21 @@ async function scrapeM3U8(slug, episode) {
  * Si son distintos → sequel normal → offset = 0.
  */
 export async function getEpisodeOffset(anilistId) {
+  return coalesceScrape(`ep_offset:${anilistId}`, () => resolveEpisodeOffset(anilistId));
+}
+
+async function resolveEpisodeOffset(anilistId) {
   const key = `ep_offset:${anilistId}`;
   const cached = cacheGet(key);
-  if (cached !== null) return cached;
+  if (cached !== null) {
+    // #region debug-point A:offset-cache-hit
+    reportAnimeAv1Debug("A", "src/providers/scraper.js:resolveEpisodeOffset:hit", "[DEBUG] animeav1 offset cache hit", { key, anilistId, offset: cached });
+    // #endregion
+    return cached;
+  }
+  // #region debug-point A:offset-cache-miss
+  reportAnimeAv1Debug("A", "src/providers/scraper.js:resolveEpisodeOffset:miss", "[DEBUG] animeav1 offset cache miss", { key, anilistId });
+  // #endregion
 
   const TTL = 7 * 24 * 60 * 60 * 1000; // 7 días — split-cours no cambia
 
@@ -848,11 +972,17 @@ export async function getEpisodeOffset(anilistId) {
         }
         console.log(`[scraper] split-cours confirmado: anilist=${anilistId} → offset=${offset} (prequel idMal=${prequelNode.idMal}, slug="${currentSlug}")`);
         cacheSet(key, offset, TTL);
+        // #region debug-point B:offset-resolved
+        reportAnimeAv1Debug("B", "src/providers/scraper.js:resolveEpisodeOffset:resolved", "[DEBUG] animeav1 offset resolved", { key, anilistId, offset, reason: "split-cours" });
+        // #endregion
         return offset;
       }
     }
 
     cacheSet(key, 0, TTL);
+    // #region debug-point B:offset-zero
+    reportAnimeAv1Debug("B", "src/providers/scraper.js:resolveEpisodeOffset:zero", "[DEBUG] animeav1 offset resolved", { key, anilistId, offset: 0, reason: "default-zero" });
+    // #endregion
     return 0;
   } catch (err) {
     console.warn(`[scraper] getEpisodeOffset(${anilistId}) falló:`, err.message);
@@ -865,26 +995,31 @@ export async function getEpisodeOffset(anilistId) {
 export async function getLatinoStream(anilistId, episode) {
   const t0 = Date.now();
   const lap = (l) => console.log(`  [latino ${anilistId}/${episode}] ${l}: ${Date.now()-t0}ms`);
+  // #region debug-point B:getLatino-start
+  reportAnimeAv1Debug("B", "src/providers/scraper.js:getLatinoStream:start", "[DEBUG] animeav1 provider start", { anilistId, episode });
+  // #endregion
 
-  // getAnilistInfo y getEpisodeOffset son independientes → paralelo
-  // getAnilistInfo reemplaza ani.zip + Jikan: obtiene título y malId desde AniList directamente
-  const [info, offset] = await Promise.all([
-    getAnilistInfo(anilistId),
+  // El slug solo necesita metadata; no tiene que esperar los probes del offset.
+  const [resolved, offset] = await Promise.all([
+    getAnilistInfo(anilistId).then(async (info) => {
+      if (!info.idMal) throw Object.assign(new Error("No MAL ID in AniList for this anime"), { status: 404 });
+      const slug = await malIdToSlug(info.idMal, info.titleRomaji, info.titleEnglish, info.year);
+      return { info, slug };
+    }),
     getEpisodeOffset(anilistId),
   ]);
-  lap(`alInfo+offset (title="${info.titleRomaji ?? info.titleEnglish}", malId=${info.idMal}, offset=${offset})`);
-
-  if (!info.idMal) throw Object.assign(new Error("No MAL ID in AniList for this anime"), { status: 404 });
+  const { info, slug } = resolved;
   const malId = info.idMal;
-
-  const slug = await malIdToSlug(malId, info.titleRomaji, info.titleEnglish, info.year);
-  lap(`slug="${slug}"`);
+  lap(`metadata+slug+offset (slug="${slug}", malId=${malId}, offset=${offset})`);
 
   const epNum = Number(episode) + offset;
   if (offset > 0) console.log(`[scraper] split-cours: ep local ${episode} → ep animeav1 ${epNum} (offset=${offset})`);
 
   const { streams, downloads } = await scrapeM3U8(slug, epNum);
   lap("scrapeM3U8");
+  // #region debug-point B:getLatino-done
+  reportAnimeAv1Debug("B", "src/providers/scraper.js:getLatinoStream:done", "[DEBUG] animeav1 provider done", { anilistId, episode, slug, offset, episodeOnPage: epNum, streamCount: streams.length, ms: Date.now() - t0 });
+  // #endregion
 
   return { slug, malId, offset, episodeOnPage: epNum, streams, downloads };
 }

@@ -12,8 +12,12 @@ const cache = new Map();
 // providers (AnimeAV1, Miruro, Cuevana, etc) suelen seguir siendo válidas por
 // varios días/semanas. El resto de caches (metadata, tmdb, mal ids, etc) son
 // baratas de recalcular y no necesitan disco.
-const PERSIST_PREFIX = "streams:";
+const PERSIST_PREFIXES = ["streams:", "reanime:streams:"];
 let db = null;
+
+function shouldPersistKey(key) {
+  return PERSIST_PREFIXES.some((prefix) => key.startsWith(prefix));
+}
 
 function initDb() {
   try {
@@ -73,7 +77,7 @@ function initDb() {
 db = initDb();
 
 function persistSet(key, value, expiresAt) {
-  if (!db || !key.startsWith(PERSIST_PREFIX)) return;
+  if (!db || !shouldPersistKey(key)) return;
   try {
     const now = Date.now();
     db.prepare(`
@@ -91,7 +95,7 @@ function persistSet(key, value, expiresAt) {
 }
 
 function persistGet(key) {
-  if (!db || !key.startsWith(PERSIST_PREFIX)) return null;
+  if (!db || !shouldPersistKey(key)) return null;
   try {
     const row = db.prepare(`SELECT payload, expires_at FROM stream_cache WHERE cache_key = ?`).get(key);
     if (!row) return null;

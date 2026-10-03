@@ -89,6 +89,9 @@ function contentTypeFor(filename) {
   if (filename.endsWith(".vtt")) return "text/vtt; charset=utf-8";
   if (filename.endsWith(".ass")) return "text/x-ssa; charset=utf-8";
   if (filename.endsWith(".srt")) return "application/x-subrip; charset=utf-8";
+  if (filename.endsWith(".webp")) return "image/webp";
+  if (filename.endsWith(".jpg") || filename.endsWith(".jpeg")) return "image/jpeg";
+  if (filename.endsWith(".png")) return "image/png";
   return "application/octet-stream";
 }
 
