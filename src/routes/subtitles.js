@@ -4,7 +4,7 @@ import { cacheGet, cacheSet } from "../lib/cache.js";
 import { getProxyBase } from "../lib/proxy.js";
 import { buildTracks, getVidrkSubsWithIndex } from "../lib/subtitles.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
-import { buildSignedR2Url } from "../lib/r2-seal.js";
+import { buildPublicR2Url } from "../lib/r2-seal.js";
 
 const router = Router();
 
@@ -39,7 +39,7 @@ async function resolveAnimeSubs(anilistId, episode, proxyBase) {
     ? crTracks.map(t => ({
         label: t.label,
         lang: t.lang,
-        url: t.r2 ? buildSignedR2Url(`subs/${t.file}`) : `${proxyBase}/subs/${t.file}`,
+        url: t.r2 ? buildPublicR2Url(`subs/${t.file}`) : `${proxyBase}/subs/${t.file}`,
         kind: t.format === "vtt" ? "captions" : "subtitles",
         ...(t.default && { default: true }),
       }))

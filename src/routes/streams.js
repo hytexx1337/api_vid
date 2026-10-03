@@ -2,7 +2,7 @@ import { Router } from "express";
 import fs from "fs";
 import { STREAM_TTL, REANIME_STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
 import { cacheGet, cacheSet, cacheDelete, timed, getR2Archive, getManualTracks, getEpisodeThumbnails, upsertEpisodeThumbnail } from "../lib/cache.js";
-import { buildSignedR2Url } from "../lib/r2-seal.js";
+import { buildPublicR2Url, buildSignedR2Url } from "../lib/r2-seal.js";
 import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { isR2Configured } from "../lib/hls-to-r2.js";
 import { archiveSubtitleTracksToR2, archiveThumbnailVttToR2 } from "../lib/reanime-r2.js";
@@ -171,6 +171,14 @@ function buildReanimeSubtitleFallbackTrack(track, proxyBase) {
   return { ...rest, url: proxyUrl };
 }
 
+function buildStableSubtitleUrl(proxyBase, file) {
+  return `${proxyBase}/subs/${file}`;
+}
+
+function buildSubtitleDeliveryUrl(proxyBase, file, fromR2 = false) {
+  return fromR2 ? buildPublicR2Url(`subs/${file}`) : buildStableSubtitleUrl(proxyBase, file);
+}
+
 function isDubLikeLang(lang) {
   return /DUB|LAT/.test(lang || "");
 }
@@ -321,7 +329,7 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   const vttTracks = (crTracks || []).filter(t => t.format === "vtt").map(t => ({
     label: t.lang === "en-US" ? "English CC" : normalizeSubLabel(t.label, t.lang),
     lang: t.lang,
-    url: t.r2 ? buildSignedR2Url(`subs/${t.file}`) : `${proxyBase}/subs/${t.file}`,
+    url: buildSubtitleDeliveryUrl(proxyBase, t.file, t.r2),
     kind: "captions",
     ...(t.default && { default: true }),
   }));
@@ -329,7 +337,7 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   const assTracks = (crTracks || []).filter(t => t.format === "ass" && WANTED_ASS_LANGS.has(t.lang)).map(t => ({
     label: ASS_LABELS[t.lang] || t.label || t.lang,
     lang: t.lang,
-    url: t.r2 ? buildSignedR2Url(`subs/${t.file}`) : `${proxyBase}/subs/${t.file}`,
+    url: buildSubtitleDeliveryUrl(proxyBase, t.file, t.r2),
     kind: "subtitles",
     ...(t.default && { default: true }),
   }));
@@ -354,7 +362,7 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   const manualTracks = getManualTracks(anilistId, episode).map(t => ({
     label: t.label,
     lang: t.lang,
-    url: buildSignedR2Url(`subs/${t.file}`),
+    url: buildPublicR2Url(`subs/${t.file}`),
     kind: t.kind || "subtitles",
   }));
 
@@ -369,7 +377,10 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   if (reanimeTracks.length) {
     const readyInR2 = reanimeTracks
       .filter((t) => t.r2Key)
-      .map(({ sourceUrl: _sourceUrl, r2Key, referer: _referer, ...rest }) => ({ ...rest, url: buildSignedR2Url(r2Key) }));
+      .map(({ sourceUrl: _sourceUrl, r2Key, referer: _referer, ...rest }) => ({
+        ...rest,
+        url: buildPublicR2Url(String(r2Key)),
+      }));
     const notArchivedYet = reanimeTracks.filter((t) => !t.r2Key);
     const fallbackTracks = notArchivedYet.map((t) => buildReanimeSubtitleFallbackTrack(t, proxyBase));
     processedReanime = [...readyInR2, ...fallbackTracks];
@@ -729,8 +740,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const proxyBase = getProxyBase(req);
   const perf = createAnimePerfLogger(anilistId, episode);
 
-  // v11: + aniwaves (hardsub EN, scraper propio)
-  const cacheKey = `streams:anime:v11:${anilistId}:${episode}`;
+  // v12: URLs públicas directas para subtítulos archivados en R2.
+  const cacheKey = `streams:anime:v12:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v10:${anilistId}:${episode}`;
   const respKey = `resp:${cacheKey}:${proxyBase}`;
   const cachedBody = cacheGet(respKey);

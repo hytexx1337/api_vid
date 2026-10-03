@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { request as undiciRequest, fetch as undiciFetch, ProxyAgent } from "undici";
-import { HEADERS, KAI_HTTP_PROXY } from "../config/constants.js";
+import { HEADERS, KAI_HTTP_PROXY, REANIME_CF_WORKER } from "../config/constants.js";
 
 const execFileAsync = promisify(execFile);
 const CURL_STATUS_MARKER = "__TRAE_STATUS__:";
@@ -23,8 +23,24 @@ export async function fetchText(url, options = {}) {
 }
 
 export async function proxyFetch(url, headers, timeoutMs = 30000) {
-  // flixcloud.cc funciona mejor con fetch nativo HTTP/2
-  if (url.includes("flixcloud.cc")) {
+  // fetch8.flixcloud.cc / reanime.to pueden devolver 403 cuando Node/undici
+  // los toca directo. Si hay Worker configurado, usar curl -> Worker evita ese
+  // fingerprint y deja /fetch funcionando también para VTT/sprites.
+  if (url.includes("flixcloud.cc") || url.includes("reanime.to")) {
+    if (REANIME_CF_WORKER) {
+      try {
+        const r = await curlWorkerFetchBuffer(url, { workerBase: REANIME_CF_WORKER, timeoutMs });
+        const buf = await r.buffer();
+        return {
+          statusCode: r.status,
+          headers: { "content-type": r.contentType || "application/octet-stream" },
+          body: (async function* () { yield buf; })(),
+        };
+      } catch {
+        // fallback al fetch nativo para entornos sin curl/worker roto.
+      }
+    }
+
     const r = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
     const buf = await r.arrayBuffer();
     return {

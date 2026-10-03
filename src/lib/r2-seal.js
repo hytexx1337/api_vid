@@ -45,6 +45,13 @@ export function buildSignedR2Url(objectPath, ttlSeconds = 86400) {
   return `${workerBase}${path}?exp=${exp}&sig=${sig}`;
 }
 
+export function buildPublicR2Url(objectPath) {
+  const workerBase = (process.env.R2_WORKER_BASE || "").replace(/\/$/, "");
+  if (!workerBase) throw new Error("R2_WORKER_BASE no está configurado");
+  const path = objectPath.startsWith("/") ? objectPath : `/${objectPath}`;
+  return `${workerBase}${path}`;
+}
+
 /**
  * Verifica una firma (uso interno / debug / tests). El Worker tiene su
  * propia implementación equivalente en Web Crypto.

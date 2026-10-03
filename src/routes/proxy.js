@@ -5,6 +5,7 @@ import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import path from "path";
 import { sealProxyUrlsInText, unsealProxyPath } from "../lib/proxy-seal.js";
+import { buildPublicR2Url } from "../lib/r2-seal.js";
 import { HEADERS, MIRURO_API, CC_MEDIA, CC_PLAYLIST, CC_SUBS } from "../config/constants.js";
 import { getProxyBase, setCacheForResponse, rewriteM3U8, parsHeaders } from "../lib/proxy.js";
 import { proxyFetch } from "../lib/http.js";
@@ -850,7 +851,13 @@ router.get("/sealed/:token", async (req, res, next) => {
 router.get("/subs/:file", async (req, res) => {
   const file = path.basename(req.params.file);
   const filepath = path.join(SUBS_DIR, file);
-  if (!existsSync(filepath)) return res.status(404).end();
+  if (!existsSync(filepath)) {
+    try {
+      return res.redirect(302, buildPublicR2Url(`subs/${file}`));
+    } catch {
+      return res.status(404).end();
+    }
+  }
   try {
     const raw = await readFile(filepath, "utf8");
     const content = removeSpamLines(raw);
