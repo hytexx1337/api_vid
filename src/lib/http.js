@@ -96,4 +96,51 @@ export async function curlWorkerFetch(targetUrl, { workerBase, timeoutMs = 15000
   };
 }
 
+export async function curlWorkerFetchBuffer(targetUrl, { workerBase, timeoutMs = 15000 } = {}) {
+  if (!workerBase) throw new Error("workerBase is required");
+  const workerUrl = `${workerBase}/fetch?url=${encodeURIComponent(targetUrl)}`;
+  const maxTimeSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const { stdout, stderr } = await execFileAsync(
+    "curl",
+    [
+      "-sS",
+      "-L",
+      "--max-time",
+      String(maxTimeSeconds),
+      "-A",
+      "curl/8.18.0",
+      "-H",
+      "Accept: */*",
+      "-w",
+      `\n${CURL_STATUS_MARKER}%{http_code}\n${CURL_CT_MARKER}%{content_type}\n`,
+      workerUrl,
+    ],
+    {
+      encoding: "buffer",
+      maxBuffer: 25 * 1024 * 1024,
+    }
+  );
+
+  const marker = Buffer.from(`\n${CURL_STATUS_MARKER}`);
+  const statusIndex = stdout.lastIndexOf(marker);
+  if (statusIndex === -1) {
+    const errText = Buffer.isBuffer(stderr) ? stderr.toString("utf8").trim() : String(stderr || "").trim();
+    throw new Error(`curl worker fetch missing status marker${errText ? `: ${errText}` : ""}`);
+  }
+
+  const body = stdout.subarray(0, statusIndex);
+  const meta = stdout.subarray(statusIndex + 1).toString("utf8").trim().split("\n");
+  const status = parseInt(meta.find((line) => line.startsWith(CURL_STATUS_MARKER))?.slice(CURL_STATUS_MARKER.length) || "0", 10);
+  const contentType = meta.find((line) => line.startsWith(CURL_CT_MARKER))?.slice(CURL_CT_MARKER.length) || "";
+
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    contentType,
+    buffer: async () => body,
+    text: async () => body.toString("utf8"),
+    json: async () => JSON.parse(body.toString("utf8")),
+  };
+}
+
 export { undiciRequest, undiciFetch, ProxyAgent };

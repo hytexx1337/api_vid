@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { PORT, REANIME_CF_WORKER } from "../config/constants.js";
+import { curlWorkerFetchBuffer } from "./http.js";
 import { isR2Configured, objectExistsInR2, uploadToR2 } from "./hls-to-r2.js";
 import { buildSignedR2Url, signR2Path } from "./r2-seal.js";
 import { removeSpamLines, srtToVtt } from "./subtitle-cleaner.js";
@@ -18,7 +20,26 @@ function withOriginHeaders(referer) {
   };
 }
 
-async function fetchBuffer(url, referer, timeoutMs = 15000) {
+function isWorkerEligibleUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === "flixcloud.cc"
+      || host.endsWith(".flixcloud.cc")
+      || host === "reanime.to"
+      || host.endsWith(".reanime.to");
+  } catch {
+    return false;
+  }
+}
+
+function buildInternalFetchUrl(url, referer, contentType = null) {
+  const params = new URLSearchParams({ url });
+  if (referer) params.set("ref", referer);
+  if (contentType) params.set("ct", contentType);
+  return `http://127.0.0.1:${PORT}/fetch?${params.toString()}`;
+}
+
+async function fetchDirectBuffer(url, referer, timeoutMs = 15000) {
   const response = await fetch(url, {
     headers: withOriginHeaders(referer),
     signal: AbortSignal.timeout(timeoutMs),
@@ -29,6 +50,47 @@ async function fetchBuffer(url, referer, timeoutMs = 15000) {
     buffer: Buffer.from(await response.arrayBuffer()),
     contentType,
   };
+}
+
+async function fetchThroughInternalProxy(url, referer, contentType = null, timeoutMs = 20000) {
+  const proxyUrl = buildInternalFetchUrl(url, referer, contentType);
+  const response = await fetch(proxyUrl, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return {
+    buffer: Buffer.from(await response.arrayBuffer()),
+    contentType: response.headers.get("content-type") || contentType || "",
+  };
+}
+
+async function fetchBuffer(url, referer, timeoutMs = 15000, contentType = null) {
+  const attempts = [];
+
+  if (REANIME_CF_WORKER && isWorkerEligibleUrl(url)) {
+    try {
+      const response = await curlWorkerFetchBuffer(url, { workerBase: REANIME_CF_WORKER, timeoutMs });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return {
+        buffer: Buffer.from(await response.buffer()),
+        contentType: response.contentType || contentType || "",
+      };
+    } catch (error) {
+      attempts.push(`worker ${error.message}`);
+    }
+  }
+
+  try {
+    return await fetchThroughInternalProxy(url, referer, contentType, timeoutMs);
+  } catch (error) {
+    attempts.push(`proxy ${error.message}`);
+  }
+
+  try {
+    return await fetchDirectBuffer(url, referer, timeoutMs);
+  } catch (error) {
+    attempts.push(`direct ${error.message}`);
+  }
+
+  throw new Error(attempts.join(" | "));
 }
 
 async function uploadIfMissing(key, buffer, contentType) {
@@ -126,7 +188,7 @@ export async function archiveThumbnailVttToR2(vttUrl, referer = FLIXCLOUD_REFERE
 
   try {
     const baseHash = sha1(vttUrl);
-    const { buffer } = await fetchBuffer(vttUrl, referer);
+    const { buffer } = await fetchBuffer(vttUrl, referer, 15000, "text/vtt");
     let text = buffer.toString("utf8");
     if (!text.startsWith("WEBVTT")) throw new Error("thumbnail VTT inválido");
     const basePath = thumbnailBasePath(vttUrl);
@@ -141,7 +203,8 @@ export async function archiveThumbnailVttToR2(vttUrl, referer = FLIXCLOUD_REFERE
       }
       const ext = absoluteUrl.match(/\.(webp|jpg|jpeg|png)(?=$|[?#])/i)?.[1]?.toLowerCase() || "webp";
       const spriteKey = `thumbs/reanime-${baseHash}/sprite-${sha1(absoluteUrl)}.${ext}`;
-      const { buffer: spriteBuffer } = await fetchBuffer(absoluteUrl, referer);
+      const contentType = inferImageContentType(absoluteUrl);
+      const { buffer: spriteBuffer } = await fetchBuffer(absoluteUrl, referer, 15000, contentType);
       await uploadIfMissing(spriteKey, spriteBuffer, inferImageContentType(absoluteUrl));
       spriteMap.set(relPath, spriteKey);
     }
