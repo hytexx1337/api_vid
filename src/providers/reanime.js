@@ -1,6 +1,7 @@
 import { extractFlixcloud } from "../extractors/flixcloud.js";
 import { cacheGet, cacheSet } from "../lib/cache.js";
-import { ANILIST_HEADERS, PROVIDER_TTL } from "../config/constants.js";
+import { curlWorkerFetch } from "../lib/http.js";
+import { ANILIST_HEADERS, PROVIDER_TTL, REANIME_CF_WORKER } from "../config/constants.js";
 
 const BASE = "https://reanime.to";
 const FLIX = "https://flixcloud.cc";
@@ -12,6 +13,27 @@ function dbg(message, data) {
   if (!REANIME_DEBUG) return;
   if (data === undefined) console.log(`[reanime] ${message}`);
   else console.log(`[reanime] ${message}`, data);
+}
+
+async function reanimeFetch(url, { timeoutMs = 15000, responseType = "json", headers = H } = {}) {
+  if (!REANIME_CF_WORKER) {
+    const response = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) throw new Error(`reanime upstream ${response.status}`);
+    return responseType === "text" ? response.text() : response.json();
+  }
+
+  const response = await curlWorkerFetch(url, { workerBase: REANIME_CF_WORKER, timeoutMs });
+  if (!response.ok) throw new Error(`reanime worker ${response.status}`);
+  return responseType === "text" ? response.text() : response.json();
+}
+
+function makeWorkerFetchImpl(timeoutMs = 15000) {
+  return async (url, options = {}) => {
+    if (!REANIME_CF_WORKER) {
+      return fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
+    }
+    return curlWorkerFetch(url, { workerBase: REANIME_CF_WORKER, timeoutMs });
+  };
 }
 
 // AniList con solo lo necesario para armar queries de búsqueda (títulos +
@@ -49,10 +71,7 @@ function buildTitles(media) {
 
 async function searchReanime(query) {
   dbg("searchReanime start", { query });
-  const data = await fetch(`${BASE}/api/v1/search?${new URLSearchParams({ q: query, limit: 10 })}`, { headers: H }).then(async (r) => {
-    if (!r.ok) throw new Error(`reanime search ${r.status}`);
-    return r.json();
-  });
+  const data = await reanimeFetch(`${BASE}/api/v1/search?${new URLSearchParams({ q: query, limit: 10 })}`, { timeoutMs: 15000, responseType: "json" });
   const results = Array.isArray(data?.results) ? data.results : [];
   dbg("searchReanime ok", { query, results: results.length });
   return results;
@@ -60,14 +79,15 @@ async function searchReanime(query) {
 
 async function fetchAnimeDetail(animeId) {
   dbg("fetchAnimeDetail start", { animeId });
-  const res = await fetch(`${BASE}/api/v1/anime/${animeId}`, { headers: H });
-  if (!res.ok) {
-    dbg("fetchAnimeDetail miss", { animeId, status: res.status });
+  try {
+    const data = await reanimeFetch(`${BASE}/api/v1/anime/${animeId}`, { timeoutMs: 15000, responseType: "json" });
+    dbg("fetchAnimeDetail ok", { animeId, anilistId: data?.anilist_id ?? null, malId: data?.mal_id ?? null });
+    return data;
+  } catch (error) {
+    const status = Number(String(error.message || "").match(/(\d+)$/)?.[1] || 0) || null;
+    dbg("fetchAnimeDetail miss", { animeId, status });
     return null;
   }
-  const data = await res.json().catch(() => null);
-  dbg("fetchAnimeDetail ok", { animeId, anilistId: data?.anilist_id ?? null, malId: data?.mal_id ?? null });
-  return data;
 }
 
 // AniList CDN cover images embed el AniList ID como bx{id}-*.
@@ -172,14 +192,8 @@ async function resolveReanimeStream(anilistId, audio, ep) {
   dbg("resolveReanimeStream series", { anilistId, audio, episode: ep, slug, title: series.title });
 
   const [watchRes, flixRes] = await Promise.allSettled([
-    fetch(`${BASE}/api/watch/${slug}/${ep}`, { headers: H }).then((r) => {
-      if (!r.ok) throw new Error(`watch ${r.status}`);
-      return r.json();
-    }),
-    fetch(`${BASE}/api/flix/${anilistId}/${ep}`, { headers: H }).then((r) => {
-      if (!r.ok) throw new Error(`flix ${r.status}`);
-      return r.json();
-    }),
+    reanimeFetch(`${BASE}/api/watch/${slug}/${ep}`, { timeoutMs: 15000, responseType: "json" }),
+    reanimeFetch(`${BASE}/api/flix/${anilistId}/${ep}`, { timeoutMs: 15000, responseType: "json" }),
   ]);
   const watchData = watchRes.status === "fulfilled" ? watchRes.value : null;
   const flixData = flixRes.status === "fulfilled" ? flixRes.value : null;
@@ -217,9 +231,13 @@ async function resolveReanimeStream(anilistId, audio, ep) {
   for (const server of servers) {
     try {
       dbg("embed start", { anilistId, audio, episode: ep, server: server.serverName, link: server.dataLink });
-      const embedRes = await fetch(server.dataLink, { headers: { ...H, Referer: `${BASE}/` } });
-      if (!embedRes.ok) throw new Error(`Embed fetch failed: ${embedRes.status}`);
-      const stream = await extractFlixcloud(await embedRes.text(), { apiBase: FLIX, headers: H, referer: `${BASE}/` });
+      const embedHtml = await reanimeFetch(server.dataLink, { timeoutMs: 15000, responseType: "text" });
+      const stream = await extractFlixcloud(embedHtml, {
+        fetchImpl: makeWorkerFetchImpl(15000),
+        apiBase: FLIX,
+        headers: H,
+        referer: `${BASE}/`,
+      });
       const downloadLink = server.dataLink.replace("/e/", "/d/");
       dbg("embed ok", {
         anilistId,

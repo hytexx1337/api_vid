@@ -74,6 +74,7 @@ export const EDGE_PROXY_BASE = process.env.EDGE_PROXY_BASE?.replace(/\/$/, "") |
 export const PROXY_CDN_BASE = process.env.PROXY_CDN_BASE?.replace(/\/$/, "") || null;
 export const KAI_HTTP_PROXY = process.env.KAI_HTTP_PROXY;
 export const KAI_CF_WORKER = process.env.KAI_CF_WORKER?.replace(/\/$/, "");
+export const REANIME_CF_WORKER = process.env.REANIME_CF_WORKER?.replace(/\/$/, "");
 export const MIRURO_CF_WORKER = process.env.MIRURO_CF_WORKER?.replace(/\/$/, "");
 export const MIRURO_API = process.env.MIRURO_API_URL || "http://localhost:8001";
 export const API_KEY = process.env.API_KEY;

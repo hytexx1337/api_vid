@@ -1,5 +1,11 @@
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { request as undiciRequest, fetch as undiciFetch, ProxyAgent } from "undici";
 import { HEADERS, KAI_HTTP_PROXY } from "../config/constants.js";
+
+const execFileAsync = promisify(execFile);
+const CURL_STATUS_MARKER = "__TRAE_STATUS__:";
+const CURL_CT_MARKER = "__TRAE_CT__:";
 
 export async function fetchJson(url, options = {}) {
   const res = await fetch(url, {
@@ -47,6 +53,47 @@ export async function kaiFetch(url, timeoutMs = 15000) {
   }
 
   return fetch(url, { headers: baseHeaders, signal: AbortSignal.timeout(timeoutMs) });
+}
+
+export async function curlWorkerFetch(targetUrl, { workerBase, timeoutMs = 15000 } = {}) {
+  if (!workerBase) throw new Error("workerBase is required");
+  const workerUrl = `${workerBase}/fetch?url=${encodeURIComponent(targetUrl)}`;
+  const maxTimeSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const { stdout, stderr } = await execFileAsync(
+    "curl",
+    [
+      "-sS",
+      "-L",
+      "--max-time",
+      String(maxTimeSeconds),
+      "-A",
+      "curl/8.18.0",
+      "-H",
+      "Accept: */*",
+      "-w",
+      `\n${CURL_STATUS_MARKER}%{http_code}\n${CURL_CT_MARKER}%{content_type}\n`,
+      workerUrl,
+    ],
+    { maxBuffer: 10 * 1024 * 1024 }
+  );
+
+  const statusIndex = stdout.lastIndexOf(`\n${CURL_STATUS_MARKER}`);
+  if (statusIndex === -1) {
+    throw new Error(`curl worker fetch missing status marker${stderr ? `: ${stderr.trim()}` : ""}`);
+  }
+
+  const body = stdout.slice(0, statusIndex);
+  const meta = stdout.slice(statusIndex + 1).trim().split("\n");
+  const status = parseInt(meta.find((line) => line.startsWith(CURL_STATUS_MARKER))?.slice(CURL_STATUS_MARKER.length) || "0", 10);
+  const contentType = meta.find((line) => line.startsWith(CURL_CT_MARKER))?.slice(CURL_CT_MARKER.length) || "";
+
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    contentType,
+    text: async () => body,
+    json: async () => JSON.parse(body),
+  };
 }
 
 export { undiciRequest, undiciFetch, ProxyAgent };
