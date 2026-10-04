@@ -746,8 +746,9 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const proxyBase = getProxyBase(req);
   const perf = createAnimePerfLogger(anilistId, episode);
 
-  // v13: expone available_fonts/extracted_fonts de reanime/flixcloud.
-  const cacheKey = `streams:anime:v13:${anilistId}:${episode}`;
+  // v14: invalida bundles viejos tras mejorar el matching de animeav1
+  // (temporadas con II / Season 2 / 2nd Season, etc.).
+  const cacheKey = `streams:anime:v14:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v11:${anilistId}:${episode}`;
   const respKey = `resp:${cacheKey}:${proxyBase}`;
   const cachedBody = cacheGet(respKey);
