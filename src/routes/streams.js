@@ -146,6 +146,12 @@ function collectReanimeSubtitleTracks(reanime) {
         r2Key: s.r2_key ?? null,
         kind: (s.format === "ass" || /\.ass(\?|$)/i.test(url)) ? "subtitles" : "captions",
         referer: "https://flixcloud.cc/",
+        ...(s.format === "ass" || /\.ass(\?|$)/i.test(url)
+          ? {
+              available_fonts: item.available_fonts ?? {},
+              extracted_fonts: item.extracted_fonts ?? [],
+            }
+          : {}),
         ...(s.default && { default: true }),
       });
     }
@@ -740,9 +746,9 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const proxyBase = getProxyBase(req);
   const perf = createAnimePerfLogger(anilistId, episode);
 
-  // v12: URLs públicas directas para subtítulos archivados en R2.
-  const cacheKey = `streams:anime:v12:${anilistId}:${episode}`;
-  const reanimeCacheKey = `reanime:streams:v10:${anilistId}:${episode}`;
+  // v13: expone available_fonts/extracted_fonts de reanime/flixcloud.
+  const cacheKey = `streams:anime:v13:${anilistId}:${episode}`;
+  const reanimeCacheKey = `reanime:streams:v11:${anilistId}:${episode}`;
   const respKey = `resp:${cacheKey}:${proxyBase}`;
   const cachedBody = cacheGet(respKey);
   if (cachedBody) return res.type("application/json").send(cachedBody);
@@ -849,6 +855,12 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       const s = makeAnimeStream(proxyBase, item.url, "auto", lang, originalProvider, { skip });
       s.proxy_url = `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(item.url)}&audio=${audioTrack}${item.manifest_key ? `&k=${encodeURIComponent(item.manifest_key)}` : ""}`;
       if (item.downloadLink) downloads.push({ lang: s.lang, langLabel: s.langLabel, server: `reanime-${item.server}`, url: item.downloadLink });
+      if (item.available_fonts && Object.keys(item.available_fonts).length) {
+        s.available_fonts = item.available_fonts;
+      }
+      if (Array.isArray(item.extracted_fonts) && item.extracted_fonts.length) {
+        s.extracted_fonts = item.extracted_fonts;
+      }
       const r2ThumbnailVtt = item.r2_thumbnail_vtt_key
         ? buildSignedR2Url(item.r2_thumbnail_vtt_key)
         : item.r2_thumbnail_vtt;

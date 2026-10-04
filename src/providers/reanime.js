@@ -196,6 +196,8 @@ async function resolveReanimeStream(anilistId, audio, ep) {
         url: stream.url,
         downloadLink,
         subtitles: stream.subtitles ?? [],
+        available_fonts: stream.available_fonts ?? {},
+        extracted_fonts: stream.extracted_fonts ?? [],
         thumbnails_vtt: stream.thumbnails_vtt ?? null,
         intro: stream.intro_chapter ?? null,
         outro: stream.outro_chapter ?? null,

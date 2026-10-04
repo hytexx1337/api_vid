@@ -420,6 +420,8 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
   return {
     url,
     subtitles: data.subtitles ?? [],
+    available_fonts: data.available_fonts ?? {},
+    extracted_fonts: data.extracted_fonts ?? [],
     thumbnails_vtt: data.thumbnails_vtt ?? null,
     video_title: data.video_title ?? null,
     intro_chapter: data.intro_chapter ?? null,
