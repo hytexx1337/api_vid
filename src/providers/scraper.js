@@ -234,8 +234,59 @@ export async function anilistToMalId(anilistId) {
 // La API acepta POST /api/search con { query: "<título>" } y devuelve
 // [{ id, title, slug }] — sin necesidad de scrapear HTML.
 
+const ROMAN_ORDINALS = new Map([
+  ["i", 1], ["ii", 2], ["iii", 3], ["iv", 4], ["v", 5],
+  ["vi", 6], ["vii", 7], ["viii", 8], ["ix", 9], ["x", 10],
+  ["xi", 11], ["xii", 12], ["xiii", 13], ["xiv", 14], ["xv", 15],
+  ["xvi", 16], ["xvii", 17], ["xviii", 18], ["xix", 19], ["xx", 20],
+]);
+
+function romanToInt(token) {
+  return ROMAN_ORDINALS.get(String(token || "").toLowerCase()) ?? null;
+}
+
+function intToRoman(num) {
+  const table = [
+    [1000, "m"], [900, "cm"], [500, "d"], [400, "cd"],
+    [100, "c"], [90, "xc"], [50, "l"], [40, "xl"],
+    [10, "x"], [9, "ix"], [5, "v"], [4, "iv"], [1, "i"],
+  ];
+  let value = Number(num);
+  if (!Number.isInteger(value) || value <= 0) return null;
+  let out = "";
+  for (const [n, roman] of table) {
+    while (value >= n) {
+      out += roman;
+      value -= n;
+    }
+  }
+  return out || null;
+}
+
+function canonicalizeTitleForMatch(str) {
+  let out = ` ${String(str || "").toLowerCase()} `;
+  out = out.replace(/[_./:+-]+/g, " ");
+  out = out.replace(/\b(\d+)(?:st|nd|rd|th)\s+season\b/g, " $1 ");
+  out = out.replace(/\bseason\s+(\d+)(?:st|nd|rd|th)?\b/g, " $1 ");
+  out = out.replace(/\bs(\d+)\b/g, " $1 ");
+  out = out.replace(/\bseason\s+([ivxlcdm]{1,6})\b/g, (_, roman) => {
+    const n = romanToInt(roman);
+    return n ? ` ${n} ` : ` ${roman} `;
+  });
+  out = out.replace(/\b([ivxlcdm]{1,6})\b\s*$/g, (_, roman) => {
+    const n = romanToInt(roman);
+    return n ? ` ${n} ` : ` ${roman} `;
+  });
+  out = out.replace(/[^a-z0-9]+/g, " ").trim();
+  return out;
+}
+
+function buildComparisonTokens(str) {
+  return new Set(canonicalizeTitleForMatch(str).match(/[a-z0-9]+/g) ?? []);
+}
+
 function normalizeTitle(t) {
-  return t.toLowerCase().replace(/[^a-z0-9]/g, "");
+  return canonicalizeTitleForMatch(t).replace(/\s+/g, "");
 }
 
 let activeSearches = 0;
@@ -269,14 +320,23 @@ async function fetchAnimeav1Search(query) {
 
 // Extrae el ordinal de temporada de un string ("2nd" → 2, "3rd" → 3, "4th" → 4, etc.)
 function extractSeasonOrdinal(str) {
-  const m = str.match(/\b(\d+)(?:st|nd|rd|th)\b/i) ?? str.match(/\bseason\s+(\d+)\b/i);
+  const input = String(str || "").toLowerCase().replace(/[_./:+-]+/g, " ");
+  const m = input.match(/\b(\d+)(?:st|nd|rd|th)\s+season\b/i)
+    ?? input.match(/\bseason\s+(\d+)(?:st|nd|rd|th)?\b/i)
+    ?? input.match(/\bs(\d+)\b/i);
   return m ? parseInt(m[1]) : null;
 }
 
 // Números presentes en un string, ignorando años entre paréntesis "(2023)".
 function extractNumbers(str) {
   const clean = str.replace(/\(\d{4}\)/g, "");
-  return new Set([...clean.matchAll(/\d+/g)].map(m => m[0]));
+  const numbers = new Set([...clean.matchAll(/\d+/g)].map(m => m[0]));
+  const season = extractSeasonOrdinal(clean);
+  if (season !== null) numbers.add(String(season));
+  const trailingRoman = clean.match(/\b([ivxlcdm]{1,6})\b\s*$/i);
+  const romanNumber = trailingRoman ? romanToInt(trailingRoman[1]) : null;
+  if (romanNumber !== null) numbers.add(String(romanNumber));
+  return numbers;
 }
 
 // Score de un resultado contra UN título: 2 = exacto/normalizado, si no Jaccard.
@@ -286,9 +346,8 @@ function scoreAgainstTitle(r, title) {
   if (r.title.toLowerCase().trim() === norm) return 2;
   if (normalizeTitle(r.title) === stripped) return 2;
   if (normalizeTitle(r.slug) === stripped) return 2;
-  const titleTokens = new Set((title.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(w => w.length > 1));
-  const slugTokens  = new Set(r.slug.split("-").filter(t => t.length > 1));
-  for (const t of (r.title.toLowerCase().match(/[a-z0-9]+/g) ?? [])) if (t.length > 1) slugTokens.add(t);
+  const titleTokens = buildComparisonTokens(title);
+  const slugTokens  = buildComparisonTokens(`${r.slug} ${r.title}`);
   const shared = [...titleTokens].filter(w => slugTokens.has(w)).length;
   const union  = titleTokens.size + slugTokens.size - shared;
   return union > 0 ? shared / union : 0;
@@ -379,7 +438,6 @@ function pickBestSlug(entries, titles, anilistYear = null) {
   return scored.map(s => s.e.r.slug);
 }
 
-// titleRomaji/titleEnglish: si se pasan, se omite Jikan.
 // Intenta romaji primero (los slugs de animeav1 usan romaji), luego inglés como fallback.
 export async function malIdToSlug(malId, titleRomaji = null, titleEnglish = null, anilistYear = null) {
   const key = JSON.stringify(["slug", malId, titleRomaji, titleEnglish, anilistYear]);
@@ -405,14 +463,7 @@ async function resolveMalIdToSlug(malId, titleRomaji, titleEnglish, anilistYear)
   const titleCandidates = [titleRomaji, titleEnglish].filter(Boolean);
 
   if (titleCandidates.length === 0) {
-    const jikanRes = await fetch(`https://api.jikan.moe/v4/anime/${malId}`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!jikanRes.ok) throw Object.assign(new Error("Anime not found in Jikan/MAL"), { status: 404 });
-    const jikanData = await jikanRes.json();
-    const t = jikanData?.data?.title;
-    if (!t) throw Object.assign(new Error("No title in Jikan response"), { status: 404 });
-    titleCandidates.push(t);
+    throw Object.assign(new Error("No AniList titles available for animeav1 lookup"), { status: 404 });
   }
 
   // Convierte un título a slug candidato: lowercase, solo alfanum+guión
@@ -421,6 +472,36 @@ async function resolveMalIdToSlug(malId, titleRomaji, titleEnglish, anilistYear)
       .replace(/[^a-z0-9\s]/g, "")   // quitar puntuación (incluye ":")
       .trim()
       .replace(/\s+/g, "-");
+  }
+
+  function stripSeasonSuffix(t) {
+    return String(t || "")
+      .replace(/\b\d+(?:st|nd|rd|th)\s+season\b/gi, " ")
+      .replace(/\bseason\s+\d+(?:st|nd|rd|th)?\b/gi, " ")
+      .replace(/\bseason\s+[ivxlcdm]{1,6}\b/gi, " ")
+      .replace(/\bs\d+\b/gi, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function buildSlugFallbacks(t) {
+    const candidates = [];
+    const push = (slug) => {
+      if (slug && !candidates.includes(slug)) candidates.push(slug);
+    };
+
+    push(titleToSlug(t));
+
+    const season = extractSeasonOrdinal(t);
+    const baseTitle = stripSeasonSuffix(t);
+    if (season !== null && baseTitle) {
+      const baseSlug = titleToSlug(baseTitle);
+      push(`${baseSlug}-${season}`);
+      const roman = intToRoman(season);
+      if (roman) push(`${baseSlug}-${roman}`);
+    }
+
+    return candidates;
   }
 
   // Verifica si un slug existe en animeav1 haciendo HEAD al ep 1
@@ -554,12 +635,13 @@ async function resolveMalIdToSlug(malId, titleRomaji, titleEnglish, anilistYear)
   //   → "rezero-kara-hajimeru-isekai-seikatsu-4th-season"
   const romajiTitle = titleCandidates[0];
   if (romajiTitle) {
-    const candidateSlug = titleToSlug(romajiTitle);
-    console.log(`[scraper] malId=${malId} → probando slug construido: "${candidateSlug}"`);
-    if (await probeSlug(candidateSlug)) {
-      console.log(`[scraper] malId=${malId} → slug construido confirmado: "${candidateSlug}"`);
-      cacheSet(key, candidateSlug, 7 * 24 * 60 * 60 * 1000);
-      return candidateSlug;
+    for (const candidateSlug of buildSlugFallbacks(romajiTitle)) {
+      console.log(`[scraper] malId=${malId} → probando slug construido: "${candidateSlug}"`);
+      if (await probeSlug(candidateSlug)) {
+        console.log(`[scraper] malId=${malId} → slug construido confirmado: "${candidateSlug}"`);
+        cacheSet(key, candidateSlug, 7 * 24 * 60 * 60 * 1000);
+        return candidateSlug;
+      }
     }
   }
 
