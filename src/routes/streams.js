@@ -698,7 +698,7 @@ function buildZenkaiStreams(r2Archived, episodeThumbnails = {}) {
     try {
       const signedUrl = buildSignedR2Url(`${entry.slug}/master.m3u8`);
       const thumbnailKey = isDubLikeLang(lang) ? dubThumbnailKey : subThumbnailKey;
-      const thumbnailUrl = thumbnailKey ? buildSignedR2Url(thumbnailKey) : null;
+      const thumbnailUrl = thumbnailKey ? buildPublicR2Url(thumbnailKey) : null;
       // Mismo formato `skip` que usan los demás providers (ver makeAnimeStream):
       // { intro: [start,end], outro: [start,end] } en segundos.
       const skip = (entry.skipIntro || entry.skipOutro)
@@ -863,7 +863,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
         s.extracted_fonts = item.extracted_fonts;
       }
       const r2ThumbnailVtt = item.r2_thumbnail_vtt_key
-        ? buildSignedR2Url(item.r2_thumbnail_vtt_key)
+        ? buildPublicR2Url(item.r2_thumbnail_vtt_key)
         : item.r2_thumbnail_vtt;
       if (r2ThumbnailVtt) {
         s.thumbnailVtt = r2ThumbnailVtt;

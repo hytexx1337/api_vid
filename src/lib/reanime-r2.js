@@ -2,7 +2,7 @@ import crypto from "node:crypto";
 import { PORT, REANIME_CF_WORKER } from "../config/constants.js";
 import { curlWorkerFetchBuffer } from "./http.js";
 import { isR2Configured, objectExistsInR2, uploadToR2 } from "./hls-to-r2.js";
-import { buildSignedR2Url, signR2Path } from "./r2-seal.js";
+import { buildSignedR2Url } from "./r2-seal.js";
 import { removeSpamLines, srtToVtt } from "./subtitle-cleaner.js";
 
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
@@ -193,11 +193,10 @@ function isSafeThumbnailAssetUrl(assetUrl, vttUrl) {
   return assetPath.startsWith("/thumbnails/") || assetPath.includes("/thumbnails/");
 }
 
-function buildSignedSiblingRef(objectKey, fragment = "", ttlSeconds = 86400) {
+function buildPublicSiblingRef(objectKey, fragment = "") {
   const path = objectKey.startsWith("/") ? objectKey : `/${objectKey}`;
   const filename = path.split("/").pop();
-  const { exp, sig } = signR2Path(path, ttlSeconds);
-  return `${filename}?exp=${exp}&sig=${sig}${fragment}`;
+  return `${filename}${fragment}`;
 }
 
 export async function archiveThumbnailVttToR2(vttUrl, { animeId = null, episode = null, variant = "sub", referer = FLIXCLOUD_REFERER } = {}) {
@@ -231,11 +230,11 @@ export async function archiveThumbnailVttToR2(vttUrl, { animeId = null, episode 
 
     text = text.replace(/^([\w./-]+\.(?:webp|jpg|jpeg|png))(#[^\s]*)?$/gim, (match, relPath, fragment = "") => {
       const spriteKey = spriteMap.get(relPath);
-      return spriteKey ? buildSignedSiblingRef(spriteKey, fragment) : match;
+      return spriteKey ? buildPublicSiblingRef(spriteKey, fragment) : match;
     });
 
     const vttKey = `${targetPrefix}/thumbs.vtt`;
-    await uploadIfMissing(vttKey, Buffer.from(text, "utf8"), "text/vtt; charset=utf-8");
+    await uploadToR2(vttKey, Buffer.from(text, "utf8"), "text/vtt; charset=utf-8");
     return vttKey;
   } catch (error) {
     console.warn(`[reanime-r2] thumbnail fallback ${vttUrl}: ${error.message}`);

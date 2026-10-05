@@ -47,13 +47,16 @@ function contentTypeFor(filename) {
   if (filename.endsWith(".vtt")) return "text/vtt; charset=utf-8";
   if (filename.endsWith(".ass")) return "text/x-ssa; charset=utf-8";
   if (filename.endsWith(".srt")) return "application/x-subrip; charset=utf-8";
+  if (filename.endsWith(".webp")) return "image/webp";
+  if (filename.endsWith(".jpg") || filename.endsWith(".jpeg")) return "image/jpeg";
+  if (filename.endsWith(".png")) return "image/png";
   return "application/octet-stream";
 }
 __name(contentTypeFor, "contentTypeFor");
-function isPublicSubtitlePath(key) {
-  return /^subs\/.+\.(vtt|ass|srt)$/i.test(key || "");
+function isPublicAssetPath(key) {
+  return /^subs\/.+\.(vtt|ass|srt)$/i.test(key || "") || /^thumbs\/.+\.(vtt|webp|png|jpe?g)$/i.test(key || "");
 }
-__name(isPublicSubtitlePath, "isPublicSubtitlePath");
+__name(isPublicAssetPath, "isPublicAssetPath");
 async function signSegmentLine(secret, dirPrefix, filename) {
   const objectPath = `/${dirPrefix}/${filename}`;
   const exp = Math.floor(Date.now() / 1e3) + SEGMENT_TTL_SECONDS;
@@ -93,10 +96,10 @@ var index_default = {
     const url = new URL(request.url);
     const pathname = decodeURIComponent(url.pathname);
     const key = pathname.replace(/^\/+/, "");
-    const publicSubtitle = isPublicSubtitlePath(key);
+    const publicAsset = isPublicAssetPath(key);
     const exp = url.searchParams.get("exp");
     const sig = url.searchParams.get("sig");
-    if (!publicSubtitle) {
+    if (!publicAsset) {
       const valid = await verifySig(env.R2_SEAL_SECRET, pathname, exp, sig);
       if (!valid) return new Response("Forbidden", { status: 403 });
     }
@@ -133,7 +136,7 @@ var index_default = {
       headers.set("content-type", contentTypeFor(filename));
       headers.set(
         "cache-control",
-        publicSubtitle ? "public, max-age=31536000, immutable" : `public, max-age=${EDGE_CACHE_TTL_SECONDS}, immutable`
+        publicAsset ? "public, max-age=31536000, immutable" : `public, max-age=${EDGE_CACHE_TTL_SECONDS}, immutable`
       );
       headers.set("access-control-allow-origin", "*");
       headers.set("accept-ranges", "bytes");

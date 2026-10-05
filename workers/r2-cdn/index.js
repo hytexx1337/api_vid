@@ -95,8 +95,11 @@ function contentTypeFor(filename) {
   return "application/octet-stream";
 }
 
-function isPublicSubtitlePath(key) {
-  return /^subs\/.+\.(vtt|ass|srt)$/i.test(key || "");
+function isPublicAssetPath(key) {
+  return (
+    /^subs\/.+\.(vtt|ass|srt)$/i.test(key || "")
+    || /^thumbs\/.+\.(vtt|webp|png|jpe?g)$/i.test(key || "")
+  );
 }
 
 async function signSegmentLine(secret, dirPrefix, filename) {
@@ -146,11 +149,11 @@ export default {
     const url = new URL(request.url);
     const pathname = decodeURIComponent(url.pathname);
     const key = pathname.replace(/^\/+/, "");
-    const publicSubtitle = isPublicSubtitlePath(key);
+    const publicAsset = isPublicAssetPath(key);
     const exp = url.searchParams.get("exp");
     const sig = url.searchParams.get("sig");
 
-    if (!publicSubtitle) {
+    if (!publicAsset) {
       const valid = await verifySig(env.R2_SEAL_SECRET, pathname, exp, sig);
       if (!valid) return new Response("Forbidden", { status: 403 });
     }
@@ -208,7 +211,7 @@ export default {
       const size = object.size;
       const headers = new Headers();
       headers.set("content-type", contentTypeFor(filename));
-      headers.set("cache-control", publicSubtitle
+      headers.set("cache-control", publicAsset
         ? "public, max-age=31536000, immutable"
         : `public, max-age=${EDGE_CACHE_TTL_SECONDS}, immutable`);
       headers.set("access-control-allow-origin", "*");
