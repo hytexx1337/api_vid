@@ -38,6 +38,7 @@ import {
   getVidupStream,
   getCinejoyStream,
   getVidyStream,
+  getVidstuckStream,
   getVixsrcStream,
   getReanimeStreams,
   getAniwavesStreams,
@@ -420,17 +421,18 @@ router.get("/movie/:tmdbId", async (req, res) => {
       const dependentPromise = Promise.all([
         tmdbMeta?.imdbId ? getCuevanaMovieStreams(tmdbMeta.imdbId).catch(e => { console.warn("[movie] cuevana:", e.message); return []; }) : Promise.resolve([]),
         isProviderEnabled("cinejoy") && tmdbMeta?.title ? timed("movie/cinejoy", () => getCinejoyStream({ tmdbId, mediaType: "movie", title: tmdbMeta.title, year: tmdbMeta.year, imdbId: tmdbMeta.imdbId })).catch(e => { console.warn("[movie] cinejoy:", e.message); return null; }) : Promise.resolve(null),
+        isProviderEnabled("vidstuck") && tmdbMeta?.title && tmdbMeta?.date ? timed("movie/vidstuck", () => getVidstuckStream({ tmdbId, mediaType: "movie", title: tmdbMeta.title, year: tmdbMeta.year, date: tmdbMeta.date, latestDate: tmdbMeta.latestDate, imdbId: tmdbMeta.imdbId })).catch(e => { console.warn("[movie] vidstuck:", e.message); return null; }) : Promise.resolve(null),
         isProviderEnabled("vidy") && tmdbMeta?.title ? timed("movie/vidy", () => getVidyStream({ tmdbId, mediaType: "movie", title: tmdbMeta.title, year: tmdbMeta.year, imdbId: tmdbMeta.imdbId })).catch(e => { console.warn("[movie] vidy:", e.message); return null; }) : Promise.resolve(null),
         isProviderEnabled("vixsrc") ? timed("movie/vixsrc", () => getVixsrcStream(tmdbId, "movie")).catch(e => { console.warn("[movie] vixsrc:", e.message); return null; }) : Promise.resolve(null),
       ]);
-      const [[vaplayerResult, vidupResult], [cuevanaStreams, cinejoyResult, vidyResult, vixsrcResult]] = await Promise.all([othersPromise, dependentPromise]);
-      const d = { tmdbMeta, cuevanaStreams, cinejoy: cinejoyResult, vidy: vidyResult, vaplayer: vaplayerResult, vidup: vidupResult, vixsrc: vixsrcResult };
+      const [[vaplayerResult, vidupResult], [cuevanaStreams, cinejoyResult, vidstuckResult, vidyResult, vixsrcResult]] = await Promise.all([othersPromise, dependentPromise]);
+      const d = { tmdbMeta, cuevanaStreams, cinejoy: cinejoyResult, vidy: vidyResult, vidstuck: vidstuckResult, vaplayer: vaplayerResult, vidup: vidupResult, vixsrc: vixsrcResult };
       cacheSet(cacheKey, d, STREAM_TTL);
       return d;
       });
     }
 
-    const { tmdbMeta, cuevanaStreams, cinejoy, vidy, vaplayer, vidup, vixsrc } = data;
+    const { tmdbMeta, cuevanaStreams, cinejoy, vidy, vidstuck, vaplayer, vidup, vixsrc } = data;
     const originalLang = tmdbMeta?.lang ?? "en";
 
     const tracks = await buildMovieTvTracks(tmdbId, "movie", 1, 1, proxyBase);
@@ -440,6 +442,7 @@ router.get("/movie/:tmdbId", async (req, res) => {
     if (vaplayer?.url) streams.push(makeVidsrcStream(vaplayer, proxyBase, mapMovieTvLang(vaplayer.lang, originalLang)));
     if (vidup?.url) streams.push(makeVidsrcStream(vidup, proxyBase, mapMovieTvLang(vidup.lang, originalLang)));
     if (cinejoy?.url) streams.push(makeGenericStream(cinejoy, proxyBase, mapMovieTvLang(cinejoy.lang, originalLang)));
+    if (vidstuck?.url) streams.push(makeGenericStream(vidstuck, proxyBase, mapMovieTvLang("en", originalLang)));
     for (const vs of vidy?.streams ?? []) streams.push(makeGenericStream(vs, proxyBase, mapMovieTvLang(vs.lang, originalLang)));
     if (vixsrc?.masterUrl) streams.push(makeVixsrcStream(vixsrc, proxyBase, mapMovieTvLang("en", originalLang)));
     const sorted = sortStreams(streams);
@@ -476,17 +479,18 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
         tmdbMeta?.imdbId ? getCuevanaStreams(tmdbMeta.imdbId, +season, +episode).catch(e => { console.warn("[tv] cuevana:", e.message); return []; }) : Promise.resolve([]),
         tmdbMeta?.imdbId ? getIntroSkip(tmdbMeta.imdbId, +season, +episode).catch(e => { console.warn("[tv] introdb:", e.message); return null; }) : Promise.resolve(null),
         isProviderEnabled("cinejoy") && tmdbMeta?.title ? timed("tv/cinejoy", () => getCinejoyStream({ tmdbId, mediaType: "tv", title: tmdbMeta.title, year: tmdbMeta.year, imdbId: tmdbMeta.imdbId, season: +season, episode: +episode })).catch(e => { console.warn("[tv] cinejoy:", e.message); return null; }) : Promise.resolve(null),
+        isProviderEnabled("vidstuck") && tmdbMeta?.title && tmdbMeta?.date ? timed("tv/vidstuck", () => getVidstuckStream({ tmdbId, mediaType: "tv", title: tmdbMeta.title, year: tmdbMeta.year, date: tmdbMeta.date, latestDate: tmdbMeta.latestDate, imdbId: tmdbMeta.imdbId, season: +season, episode: +episode })).catch(e => { console.warn("[tv] vidstuck:", e.message); return null; }) : Promise.resolve(null),
         isProviderEnabled("vidy") && tmdbMeta?.title ? timed("tv/vidy", () => getVidyStream({ tmdbId, mediaType: "tv", title: tmdbMeta.title, year: tmdbMeta.year, imdbId: tmdbMeta.imdbId, season: +season, episode: +episode })).catch(e => { console.warn("[tv] vidy:", e.message); return null; }) : Promise.resolve(null),
         isProviderEnabled("vixsrc") ? timed("tv/vixsrc", () => getVixsrcStream(tmdbId, "tv", +season, +episode)).catch(e => { console.warn("[tv] vixsrc:", e.message); return null; }) : Promise.resolve(null),
       ]);
-      const [[vaplayerResult, vidupResult], [cuevanaStreams, skipData, cinejoyResult, vidyResult, vixsrcResult]] = await Promise.all([othersPromise, dependentPromise]);
-      const d = { tmdbMeta, cuevanaStreams, cinejoy: cinejoyResult, vidy: vidyResult, skip: skipData, vaplayer: vaplayerResult, vidup: vidupResult, vixsrc: vixsrcResult };
+      const [[vaplayerResult, vidupResult], [cuevanaStreams, skipData, cinejoyResult, vidstuckResult, vidyResult, vixsrcResult]] = await Promise.all([othersPromise, dependentPromise]);
+      const d = { tmdbMeta, cuevanaStreams, cinejoy: cinejoyResult, vidy: vidyResult, vidstuck: vidstuckResult, skip: skipData, vaplayer: vaplayerResult, vidup: vidupResult, vixsrc: vixsrcResult };
       cacheSet(cacheKey, d, STREAM_TTL);
       return d;
       });
     }
 
-    const { tmdbMeta, cuevanaStreams, cinejoy, vidy, skip, vaplayer, vidup, vixsrc } = data;
+    const { tmdbMeta, cuevanaStreams, cinejoy, vidy, vidstuck, skip, vaplayer, vidup, vixsrc } = data;
     const originalLang = tmdbMeta?.lang ?? "en";
 
     const tracks = await buildMovieTvTracks(tmdbId, "tv", +season, +episode, proxyBase);
@@ -496,6 +500,7 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
     if (vaplayer?.url) streams.push(makeVidsrcStream(vaplayer, proxyBase, mapMovieTvLang(vaplayer.lang, originalLang)));
     if (vidup?.url) streams.push(makeVidsrcStream(vidup, proxyBase, mapMovieTvLang(vidup.lang, originalLang)));
     if (cinejoy?.url) streams.push(makeGenericStream(cinejoy, proxyBase, mapMovieTvLang(cinejoy.lang, originalLang)));
+    if (vidstuck?.url) streams.push(makeGenericStream(vidstuck, proxyBase, mapMovieTvLang("en", originalLang)));
     for (const vs of vidy?.streams ?? []) streams.push(makeGenericStream(vs, proxyBase, mapMovieTvLang(vs.lang, originalLang)));
     if (vixsrc?.masterUrl) streams.push(makeVixsrcStream(vixsrc, proxyBase, mapMovieTvLang("en", originalLang)));
 

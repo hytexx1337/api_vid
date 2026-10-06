@@ -14,6 +14,7 @@ import {
   getVidupStream,
   getCinejoyStream,
   getVidyStream,
+  getVidstuckStream,
   getVixsrcStream,
 } from "../providers/index.js";
 
@@ -76,6 +77,13 @@ router.get("/movie/:tmdbId/:provider", async (req, res) => {
         for (const vs of result?.streams ?? []) streams.push(makeGenericStream(vs, proxyBase, mapMovieTvLang(vs.lang, tmdbMeta?.lang)));
         break;
       }
+      case "vidstuck": {
+        if (!tmdbMeta?.title || !tmdbMeta?.date) break;
+        const result = await getVidstuckStream({ tmdbId, mediaType: "movie", title: tmdbMeta.title, year: tmdbMeta.year, date: tmdbMeta.date, latestDate: tmdbMeta.latestDate, imdbId: tmdbMeta.imdbId });
+        if (!result?.url) break;
+        streams = [makeGenericStream(result, proxyBase, mapMovieTvLang("en", tmdbMeta?.lang))];
+        break;
+      }
       case "vixsrc": {
         const result = await getVixsrcStream(tmdbId, "movie").catch(() => null);
         if (!result?.masterUrl) break;
@@ -136,6 +144,13 @@ router.get("/tv/:tmdbId/:season/:episode/:provider", async (req, res) => {
         if (!tmdbMeta?.title) break;
         const result = await getVidyStream({ tmdbId, mediaType: "tv", title: tmdbMeta.title, year: tmdbMeta.year, imdbId: tmdbMeta.imdbId, season: +season, episode: +episode });
         for (const vs of result?.streams ?? []) streams.push(makeGenericStream(vs, proxyBase, mapMovieTvLang(vs.lang, tmdbMeta?.lang)));
+        break;
+      }
+      case "vidstuck": {
+        if (!tmdbMeta?.title || !tmdbMeta?.date) break;
+        const result = await getVidstuckStream({ tmdbId, mediaType: "tv", title: tmdbMeta.title, year: tmdbMeta.year, date: tmdbMeta.date, latestDate: tmdbMeta.latestDate, imdbId: tmdbMeta.imdbId, season: +season, episode: +episode });
+        if (!result?.url) break;
+        streams = [makeGenericStream(result, proxyBase, mapMovieTvLang("en", tmdbMeta?.lang))];
         break;
       }
       case "vixsrc": {

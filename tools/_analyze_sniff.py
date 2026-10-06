@@ -7,7 +7,8 @@ import base64
 from urllib.parse import urlparse
 from collections import Counter
 
-OUT = os.path.join(os.path.dirname(__file__), "_sniff_out")
+OUT_ARG = sys.argv[1] if len(sys.argv) > 1 else "_sniff_out"
+OUT = OUT_ARG if os.path.isabs(OUT_ARG) else os.path.join(os.path.dirname(__file__), OUT_ARG)
 entries = [json.loads(l) for l in open(os.path.join(OUT, "index.jsonl"), encoding="utf-8")]
 
 reqs = {e["n"]: e for e in entries if e["kind"] == "request"}

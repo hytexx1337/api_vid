@@ -16,6 +16,7 @@ export { getVaplayerStream } from "./scraper-vaplayer.js";
 export { getVidupStream } from "./scraper-vidup.js";
 export { getCinejoyStream } from "./scraper-cinejoy.js";
 export { getVidyStream } from "./scraper-vidy.js";
+export { getVidstuckStream } from "./scraper-vidstuck.js";
 export { getVidcoreStream, getVidrkSubs } from "./scraper-vidcore.js";
 export { getVixsrcStream } from "./scraper-vixsrc.js";
 export { getReanimeStreams } from "./reanime.js";

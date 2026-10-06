@@ -15,8 +15,16 @@ export async function fetchTmdbMeta(tmdbId, mediaType = "movie") {
   const data = await r.json();
   const imdbId = data.imdb_id ?? data.external_ids?.imdb_id ?? null;
   const dateStr = data.release_date ?? data.first_air_date ?? null;
+  const latestDate = data.last_air_date ?? dateStr ?? null;
   const year = dateStr ? parseInt(dateStr.slice(0, 4)) : null;
-  const result = { imdbId, lang: data.original_language ?? "en", title: data.title ?? data.name ?? null, year };
+  const result = {
+    imdbId,
+    lang: data.original_language ?? "en",
+    title: data.title ?? data.name ?? null,
+    year,
+    date: dateStr,
+    latestDate,
+  };
 
   cacheSet(cacheKey, result, 24 * 60 * 60 * 1000);
   return result;

@@ -1,7 +1,7 @@
 # Sniffer camoufox — captura TODAS las requests/responses de una página.
 # Cada response se guarda como archivo en out_dir/bodies/NNN.bin + un
 # index.jsonl con metadatos (url, headers, post_data, status, timing).
-# Uso: python tools/_sniff_movy.py [url] [segundos]
+# Uso: python tools/_sniff_movy.py [url] [segundos] [out_dir]
 import json
 import os
 import sys
@@ -10,9 +10,43 @@ import base64
 import threading
 from urllib.parse import urlparse
 
-URL = sys.argv[1] if len(sys.argv) > 1 else "https://www.movy.sx/tv/1404/1/6?play=true"
-WAIT_S = int(sys.argv[2]) if len(sys.argv) > 2 else 45
-OUT = os.path.join(os.path.dirname(__file__), "_sniff_out")
+DEFAULT_URL = "https://vidstuck.xyz/embed/tv/1404/1/13?branding=StreameX&server=orion&loading=1&back=true"
+
+
+def parse_args(argv):
+    url = DEFAULT_URL
+    wait_s = 45
+    out_arg = "_sniff_out"
+
+    args = [str(arg).strip() for arg in argv if str(arg).strip()]
+    if not args:
+        return url, wait_s, out_arg
+
+    first = args[0].strip("`'\" \t\r\n")
+    if first:
+        if first.isdigit():
+            wait_s = int(first)
+        else:
+            url = first
+
+    if len(args) > 1:
+        second = args[1].strip("`'\" \t\r\n")
+        if second:
+            if second.isdigit():
+                wait_s = int(second)
+            else:
+                out_arg = second
+
+    if len(args) > 2:
+        third = args[2].strip("`'\" \t\r\n")
+        if third:
+            out_arg = third
+
+    return url, wait_s, out_arg
+
+
+URL, WAIT_S, OUT_ARG = parse_args(sys.argv[1:])
+OUT = OUT_ARG if os.path.isabs(OUT_ARG) else os.path.join(os.path.dirname(__file__), OUT_ARG)
 BODIES = os.path.join(OUT, "bodies")
 os.makedirs(BODIES, exist_ok=True)
 

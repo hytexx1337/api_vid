@@ -518,12 +518,19 @@ router.get(["/vixsrc-seg", "/vixsrc-seg.m3u8"], async (req, res) => {
 // ── DASH proxy ────────────────────────────────────────────────────────────────
 function encodeDashOrigin(origin) { return Buffer.from(origin).toString("base64url"); }
 function decodeDashOrigin(token) { return Buffer.from(token, "base64url").toString("utf8"); }
+function escapeXmlAttr(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
 function rewriteDashAttr(attrName, manifestUrl, proxyBase) {
   return (full, value) => {
     try {
       const resolved = new URL(value, manifestUrl);
       const token = encodeDashOrigin(resolved.origin);
-      return `${attrName}="${proxyBase}/dash-seg/${token}${resolved.pathname}${resolved.search}"`;
+      return `${attrName}="${escapeXmlAttr(`${proxyBase}/dash-seg/${token}${resolved.pathname}${resolved.search}`)}"`;
     } catch { return full; }
   };
 }
@@ -807,7 +814,7 @@ router.get("/ghost-proxy", async (req, res) => {
 
 // ── Sealed proxy endpoint ─────────────────────────────────────────────────────
 router.get("/sealed/:token", async (req, res, next) => {
-  const token = String(req.params.token).replace(/\.m3u8$/i, "");
+  const token = String(req.params.token).replace(/\.(?:m3u8|mpd)$/i, "");
   let originalPath;
   try {
     originalPath = unsealProxyPath(token);
@@ -817,7 +824,7 @@ router.get("/sealed/:token", async (req, res, next) => {
     return res.status(400).json({ error: "invalid or expired token" });
   }
   try {
-    const internalUrl = `http://127.0.0.1:${req.socket.localPort}${originalPath}${originalPath.includes("?") ? "&" : "?"}_cb=${Date.now()}`;
+    const internalUrl = `http://127.0.0.1:${req.socket.localPort}${originalPath}`;
     const proxyBase = getProxyBase(req);
     const headers = { ...req.headers };
     delete headers.host;

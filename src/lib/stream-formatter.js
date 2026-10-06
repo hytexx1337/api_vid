@@ -180,7 +180,7 @@ export function makeVidRockStreams(result, proxyBase) {
   });
 }
 
-const PROVIDER_ORDER = { vidy: 1, cinejoy: 2, vidup: 3, vaplayer: 4 };
+const PROVIDER_ORDER = { vidstuck: 1, vidy: 2, cinejoy: 3, vidup: 4, vaplayer: 5 };
 
 function providerPriority(s) {
   const op = String(s.originalProvider).toLowerCase();
@@ -200,9 +200,11 @@ export function sortStreams(streams) {
     return 2 + (10000 - res) / 10000;
   };
   return [...streams].sort((a, b) => {
+    const providerRankA = providerPriority(a), providerRankB = providerPriority(b);
+    if (providerRankA !== providerRankB) return providerRankA - providerRankB;
     const pa = priority(a), pb = priority(b);
     if (pa !== pb) return pa - pb;
-    return providerPriority(a) - providerPriority(b);
+    return 0;
   });
 }
 

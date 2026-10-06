@@ -69,21 +69,23 @@ const PROXY_PATH_PATTERN =
   "vix-stream\\.m3u8|" +
   "generic-stream\\.m3u8|generic-media\\.m3u8|generic-seg|" +
   "vixsrc-stream\\.m3u8|vixsrc-seg\\.m3u8|vixsrc-seg|" +
-  "dash-proxy\\.mpd|dash-seg|" +
+  "dash-proxy\\.mpd|dash-seg(?:\\/[^?\"'\\s]*)?|" +
   "aes-key" +
   ")";
 
 const PROXY_PATH_RE = new RegExp(`^(/${PROXY_PATH_PATTERN})(?:\\?|$)`);
 
-// Endpoints que siempre devuelven playlists y necesitan que la URL sellada
-// termine en .m3u8 para que ffmpeg/reproductores la reconozcan (solo Vixsrc).
+// Endpoints que siempre devuelven playlists y necesitan conservar una
+// extensión reconocible para que ffmpeg/reproductores las traten como
+// manifests en vez de descargas genéricas.
 const PLAYLIST_PATH_PATTERN =
   "(?:" +
-  "vixsrc-stream\\.m3u8|vixsrc-seg\\.m3u8" +
+  "vixsrc-stream\\.m3u8|vixsrc-seg\\.m3u8|dash-proxy\\.mpd" +
   ")";
 const PLAYLIST_PATH_RE = new RegExp(`^(/${PLAYLIST_PATH_PATTERN})(?:\\?|$)`);
 
 function sealedExtForPath(rest) {
+  if (/^\/dash-proxy\.mpd(?:\?|$)/.test(rest)) return ".mpd";
   return PLAYLIST_PATH_RE.test(rest) ? ".m3u8" : "";
 }
 
@@ -114,6 +116,14 @@ function maybeSeal(value, proxyBase) {
   return buildSealedUrl(rest, proxyBase);
 }
 
+function shouldSkipTextSeal(pathAndQuery) {
+  // DASH SegmentTemplate necesita que placeholders como
+  // $RepresentationID$ / $Number%05d$ sigan visibles para que el player los
+  // sustituya antes de pedir el segmento. Si sellamos /dash-seg, el template
+  // queda atrapado dentro del token opaco y el CDN recibe el literal "$...$".
+  return /^\/dash-seg(?:\/|$)/.test(pathAndQuery);
+}
+
 /**
  * Reemplaza URLs internas de proxy que aparezcan dentro de texto (playlists
  * HLS/DASH, VTT, JSON, etc.) por URLs selladas absolutas proxyBase/sealed/:token.
@@ -132,7 +142,11 @@ export function sealProxyUrlsInText(text, proxyBase) {
     `${originPart}?(/${PROXY_PATH_PATTERN}(?:\\?[^\\s"']*)?)`,
     "g"
   );
-  return text.replace(re, (_, pathAndQuery) => buildSealedUrl(pathAndQuery, proxyBase));
+  return text.replace(re, (_, pathAndQuery) => (
+    shouldSkipTextSeal(pathAndQuery)
+      ? `${proxyBase}${pathAndQuery}`
+      : buildSealedUrl(pathAndQuery, proxyBase)
+  ));
 }
 
 function walkAndSeal(obj, proxyBase) {
