@@ -1,207 +1,231 @@
 import base64
-import gzip
 import json
+import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from curl_cffi import requests
 from flask import Flask, jsonify, request, Response
+
+try:
+    from curl_cffi import requests as http_requests
+    HAS_CURL_CFFI = True
+except ModuleNotFoundError:
+    import requests as http_requests
+    HAS_CURL_CFFI = False
 
 app = Flask(__name__)
 
-PIPE_URL = "https://www.miruro.tv/api/secure/pipe"
+BASE_URL = "https://barelystarted.miruro.tv"
+SEARCH_URL = f"{BASE_URL}/api/search/browse"
+SOURCES_URL = f"{BASE_URL}/api/sources"
+ANILIST_URL = "https://graphql.anilist.co"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
-    "Referer": "https://www.miruro.tv/",
-    "Origin": "https://www.miruro.tv",
-    "Accept": "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "sec-fetch-site": "same-origin",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-dest": "empty",
-    "sec-ch-ua": '"Chromium";v="110", "Not A(Brand";v="24", "Google Chrome";v="110"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-}
-
+STRMCX_ORIGIN = "https://strm.cx"
+PROXY_HOST = "https://s1.keeply.top/"
 PROXY_KEY = bytes.fromhex("a54d389c18527d9fd3e7f0643e27edbe")
 
-BLOCKED_HOSTS = ["mewstream.buzz", "watching.onl", "mewcdn.buzz"]
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+    "Referer": f"{BASE_URL}/",
+    "Origin": BASE_URL,
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
-# Providers de Miruro descartados antes de siquiera pedirles el source (moo y
-# bonk suelen fallar la verificación de reproducibilidad río abajo).
+BLOCKED_HOSTS = ["mewstream.buzz", "watching.onl", "mewcdn.buzz"]
 EXCLUDED_PROVIDERS = {"moo", "bonk"}
 
-_proxy_host_cache = {"value": None, "fetched_at": 0}
+_media_cache = {}
+_sources_cache = {}
 
 
-def _fetch_env():
-    res = requests.get("https://www.miruro.tv/env2.js", headers=HEADERS, impersonate="chrome110", timeout=10)
-    raw = res.text.split('JSON.parse("', 1)[1].rsplit('")', 1)[0]
-    env = json.loads(raw.encode().decode("unicode_escape"))
-    _proxy_host_cache["value"] = env["VITE_PROXY_B"]
-    _proxy_host_cache["referer_origin"] = env["VITE_REFERER_ORIGIN"]
-    _proxy_host_cache["fetched_at"] = time.time()
+def _cache_get(cache, key):
+    entry = cache.get(key)
+    if not entry or time.time() > entry["exp"]:
+        cache.pop(key, None)
+        return None
+    return entry["value"]
 
 
-def get_proxy_host():
-    if not _proxy_host_cache["value"] or time.time() - _proxy_host_cache["fetched_at"] >= 3600:
-        _fetch_env()
-    return _proxy_host_cache["value"]
+def _cache_set(cache, key, value, ttl):
+    cache[key] = {"value": value, "exp": time.time() + ttl}
+    return value
 
 
-# Origin/Referer fijo (VITE_REFERER_ORIGIN, ej. "https://strm.cx") que espera
-# el proxy de Miruro (s1.piltover.li/s1.watami.win) en el request que le
-# llega a ÉL — no confundir con el `referer` por-provider que se embebe
-# encriptado en la URL (ese es el que Miruro usa internamente para pedirle al
-# host de video real, y sí varía por provider).
-def get_referer_origin():
-    if not _proxy_host_cache.get("referer_origin") or time.time() - _proxy_host_cache["fetched_at"] >= 3600:
-        _fetch_env()
-    return _proxy_host_cache["referer_origin"]
+def _impersonation_kwargs():
+    return {"impersonate": "chrome110"} if HAS_CURL_CFFI else {}
 
 
-def pipe(path, query, timeout=15):
-    payload = {"path": path, "method": "GET", "query": query, "body": None, "version": "0.1.0"}
-    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+def _http_get(url, **kwargs):
+    return http_requests.get(url, **kwargs, **_impersonation_kwargs())
 
-    res = requests.get(f"{PIPE_URL}?e={encoded}", headers=HEADERS, impersonate="chrome110", timeout=timeout)
+
+def _http_post(url, **kwargs):
+    return http_requests.post(url, **kwargs, **_impersonation_kwargs())
+
+
+def _json_get(url, params=None, headers=None, timeout=15):
+    res = _http_get(
+        url,
+        params=params,
+        headers={**HEADERS, **(headers or {})},
+        timeout=timeout,
+    )
     if res.status_code != 200:
-        raise RuntimeError(f"pipe {path} failed: {res.status_code}")
-
-    padded = res.text.strip()
-    padded += "=" * (-len(padded) % 4)
-    return json.loads(gzip.decompress(base64.urlsafe_b64decode(padded)))
+        raise RuntimeError(f"GET {url} failed: {res.status_code}")
+    return res.json()
 
 
-def maybe_decode_id(value):
-    if not isinstance(value, str):
-        return value
-    try:
-        padded = value + "=" * (-len(value) % 4)
-        decoded = base64.urlsafe_b64decode(padded).decode()
-        return decoded if ":" in decoded else value
-    except Exception:
-        return value
+def _anilist_titles(anilist_id):
+    query = """
+    query ($id: Int) {
+      Media(id: $id, type: ANIME) {
+        title { romaji english native }
+        synonyms
+      }
+    }
+    """
+    res = _http_post(
+        ANILIST_URL,
+        json={"query": query, "variables": {"id": anilist_id}},
+        headers={"Accept": "application/json", "Content-Type": "application/json"},
+        timeout=12,
+    )
+    if res.status_code != 200:
+        raise RuntimeError(f"AniList failed: {res.status_code}")
+
+    media = (res.json().get("data") or {}).get("Media") or {}
+    title = media.get("title") or {}
+    candidates = [title.get("english"), title.get("romaji"), title.get("native")]
+    candidates.extend(media.get("synonyms") or [])
+
+    seen = set()
+    result = []
+    for value in candidates:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
-def decode_ids(node):
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if key == "id":
-                node[key] = maybe_decode_id(value)
-            else:
-                decode_ids(value)
-    elif isinstance(node, list):
-        for item in node:
-            decode_ids(item)
+def _slug(title):
+    text = (title or "").lower()
+    text = re.sub(r"[^a-z0-9]+", "-", text)
+    return text.strip("-") or "anime"
+
+
+def resolve_media(anilist_id):
+    cached = _cache_get(_media_cache, anilist_id)
+    if cached:
+        return cached
+
+    wanted = str(anilist_id)
+    for title in _anilist_titles(anilist_id):
+        data = _json_get(SEARCH_URL, {"q": title, "limit": 8, "type": "ANIME"})
+        for item in data.get("data") or []:
+            external_ids = item.get("external_ids") or item.get("externalIds") or {}
+            if wanted in [str(v) for v in external_ids.get("anilist", [])]:
+                media = {
+                    "id": item["id"],
+                    "slug": _slug((item.get("title") or {}).get("english") or (item.get("title") or {}).get("romaji") or title),
+                }
+                return _cache_set(_media_cache, anilist_id, media, 6 * 3600)
+
+    raise RuntimeError(f"Miruro media not found for AniList {anilist_id}")
 
 
 def xor(data, key):
     return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
 
 
+def _proxy_part(value):
+    return base64.urlsafe_b64encode(xor(value.encode(), PROXY_KEY)).decode().rstrip("=")
+
+
 def build_proxy_url(stream_url, referer):
-    host = get_proxy_host()
-    enc_url = base64.urlsafe_b64encode(xor(stream_url.encode(), PROXY_KEY)).decode().rstrip("=")
+    enc_url = _proxy_part(stream_url)
     if not referer:
-        return f"{host}{enc_url}/pl.m3u8"
-    enc_ref = base64.urlsafe_b64encode(xor(referer.encode(), PROXY_KEY)).decode().rstrip("=")
-    return f"{host}{enc_url}~{enc_ref}/pl.m3u8"
+        return f"{PROXY_HOST}{enc_url}/pl.m3u8"
+    return f"{PROXY_HOST}{enc_url}~{_proxy_part(referer)}/pl.m3u8"
 
 
-def find_episode(providers, provider, category, number):
-    episodes = providers.get(provider, {}).get("episodes", {}).get(category, [])
-    for ep in episodes:
-        if ep.get("number") == number:
-            return ep.get("id")
-    return None
+def _ok_stream(stream):
+    url = stream.get("url") if isinstance(stream, dict) else None
+    return bool(url) and not any(host in url for host in BLOCKED_HOSTS)
 
 
-def pick_stream(source):
-    if not source:
+def _pick_download(downloads):
+    if not isinstance(downloads, list) or not downloads:
         return None
-    streams = source.get("streams") or source.get("sources") or []
-    ok = lambda s: s.get("url") and not any(host in s["url"] for host in BLOCKED_HOSTS)
+    best = next((d for d in downloads if d.get("quality") == "1080p" and d.get("url")), None)
+    return (best or next((d for d in downloads if d.get("url")), None) or {}).get("url")
 
-    stream = next((s for s in streams if s.get("type") == "hls" and ok(s)), None)
-    if not stream:
-        stream = next((s for s in streams if ".m3u8" in (s.get("url") or "") and ok(s)), None)
-    if not stream:
-        stream = next((s for s in streams if s.get("type") != "embed" and ok(s)), None)
-    if not stream:
-        return None
 
-    subs = [
-        {
-            "label": t.get("label"),
-            "lang": t.get("language") or t.get("lang") or t.get("srclang"),
-            "url": t.get("file") or t.get("url"),
-        }
-        for t in (source.get("subtitles") or source.get("tracks") or [])
-        if t.get("kind") != "thumbnails"
-    ]
-
-    referer = stream.get("referer")
-    referer_origin = get_referer_origin()
+def _normalize_subtitle(track):
     return {
-        "url": stream["url"],
-        "proxyUrl": build_proxy_url(stream["url"], referer),
-        # OJO: el header que va acá es para pegarle al proxy de Miruro
-        # (piltover.li/watami.win) mismo, no al host de video real — por eso
-        # usa el origin fijo (VITE_REFERER_ORIGIN) y no el `referer` de arriba.
-        "headers": {"Referer": f"{referer_origin}/", "Origin": referer_origin} if referer_origin else {},
-        "subtitles": subs,
-        "download": source.get("download"),
+        "label": track.get("label"),
+        "lang": track.get("language") or track.get("lang") or track.get("srclang"),
+        "url": track.get("file") or track.get("url"),
+        "format": track.get("format"),
+        "default": track.get("default"),
     }
 
 
-def _fetch_source(provider, episode_id, anilist_id, category):
-    encoded_id = base64.urlsafe_b64encode(episode_id.encode()).decode().rstrip("=")
-    try:
-        # Timeout corto por provider: si uno cuelga (ej. kiwi con episodeIds
-        # stale) no debe arrastrar el resto ni acercarse al timeout de 20s
-        # que tiene el cliente Node (miruro.js).
-        source = pipe("sources", {
-            "episodeId": encoded_id,
-            "provider": provider,
-            "category": category,
-            "anilistId": anilist_id,
-        }, timeout=8)
-    except Exception:
-        return None
+def _flatten_sources(data):
+    result = {"dub": [], "sub": []}
 
-    stream = pick_stream(source)
-    if stream:
-        stream["provider"] = provider
-    return stream
+    for track in data.get("tracks") or []:
+        bucket = "dub" if track.get("track") == "dub" else "sub"
+
+        for provider_entry in track.get("providers") or []:
+            provider = provider_entry.get("provider") or "miruro"
+            if provider in EXCLUDED_PROVIDERS:
+                continue
+
+            subtitles = [
+                _normalize_subtitle(t)
+                for t in (provider_entry.get("subtitles") or [])
+                if (t.get("file") or t.get("url"))
+            ]
+            download = _pick_download(provider_entry.get("downloads"))
+
+            for server in provider_entry.get("servers") or []:
+                headers = server.get("headers") or {}
+                referer = headers.get("Referer") or headers.get("referer")
+                streams = [s for s in (server.get("streams") or []) if _ok_stream(s)]
+                hls = next((s for s in streams if s.get("format") == "hls"), None)
+                stream = hls or next((s for s in streams if ".m3u8" in s.get("url", "")), None) or (streams[0] if streams else None)
+                if not stream:
+                    continue
+
+                result[bucket].append({
+                    "url": stream["url"],
+                    "proxyUrl": build_proxy_url(stream["url"], referer),
+                    "headers": {"Referer": f"{STRMCX_ORIGIN}/", "Origin": STRMCX_ORIGIN},
+                    "provider": provider,
+                    "server": server.get("server"),
+                    "quality": stream.get("quality"),
+                    "subtitles": subtitles,
+                    "download": download,
+                })
+
+    return result
 
 
-def resolve_category(providers, anilist_id, episode_number, category):
-    tasks = []
-    for provider in providers:
-        if provider in EXCLUDED_PROVIDERS:
-            continue
-        episode_id = find_episode(providers, provider, category, episode_number)
-        if episode_id:
-            tasks.append((provider, episode_id))
+def resolve_sources(anilist_id, episode):
+    cache_key = f"{anilist_id}:{episode}"
+    cached = _cache_get(_sources_cache, cache_key)
+    if cached:
+        return cached
 
-    if not tasks:
-        return []
-
-    results = []
-    # Providers en paralelo: el tiempo total pasa a ser ~max(latencias) en vez
-    # de la suma, así un provider colgado no bloquea a los demás.
-    with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
-        futures = [executor.submit(_fetch_source, provider, episode_id, anilist_id, category) for provider, episode_id in tasks]
-        for future in as_completed(futures):
-            stream = future.result()
-            if stream:
-                results.append(stream)
-
-    return results
+    media = resolve_media(anilist_id)
+    data = _json_get(
+        SOURCES_URL,
+        {"id": media["id"], "n": str(episode)},
+        {"Referer": f"{BASE_URL}/watch/{media['id']}/{media['slug']}?ep={episode}"},
+        timeout=25,
+    )
+    return _cache_set(_sources_cache, cache_key, _flatten_sources(data), 15 * 60)
 
 
 @app.get("/raw-proxy")
@@ -209,12 +233,12 @@ def raw_proxy():
     url = request.args.get("u")
     if not url:
         return jsonify({"error": "Missing u param"}), 400
-    referer = request.args.get("ref") or request.headers.get("Referer") or "https://www.miruro.tv/"
+    referer = request.args.get("ref") or request.headers.get("Referer") or f"{BASE_URL}/"
     headers = HEADERS.copy()
     headers["Referer"] = referer
     headers["Origin"] = referer.rstrip("/")
     try:
-        res = requests.get(url, headers=headers, impersonate="chrome110", timeout=30)
+        res = _http_get(url, headers=headers, timeout=30)
         ct = res.headers.get("Content-Type") or "application/octet-stream"
         return Response(res.content, status=res.status_code, content_type=ct)
     except Exception as e:
@@ -224,16 +248,7 @@ def raw_proxy():
 @app.get("/watch/<int:anilist_id>/<int:episode>")
 def watch(anilist_id, episode):
     try:
-        episodes = pipe("episodes", {"anilistId": anilist_id})
-        decode_ids(episodes)
-        providers = episodes.get("providers", {})
-
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            dub_future = executor.submit(resolve_category, providers, anilist_id, episode, "dub")
-            sub_future = executor.submit(resolve_category, providers, anilist_id, episode, "sub")
-            dub = dub_future.result()
-            sub = sub_future.result()
-        return jsonify({"dub": dub, "sub": sub})
+        return jsonify(resolve_sources(anilist_id, episode))
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 

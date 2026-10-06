@@ -954,7 +954,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
           skip: miruroStream.skip && (miruroStream.skip.intro || miruroStream.skip.outro) ? miruroStream.skip : null,
           headers: Object.keys(miruroStream.headers ?? {}).length ? miruroStream.headers : null,
         });
-        s.proxy_url = `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(miruroStream.url)}&ref=${encodeURIComponent("https://www.miruro.tv/")}`;
+        const miruroRef = miruroStream.headers?.Referer || "https://strm.cx/";
+        s.proxy_url = `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(miruroStream.url)}&ref=${encodeURIComponent(miruroRef)}`;
         streams.push(s);
       }
     }

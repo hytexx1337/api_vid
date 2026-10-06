@@ -259,7 +259,7 @@ function rewriteGenericPlaylist(text, baseUrl, refEnc) {
       if (trimmed.startsWith("#EXT-X-KEY") || trimmed.startsWith("#EXT-X-MAP") || trimmed.startsWith("#EXT-X-MEDIA") || trimmed.startsWith("#EXT-X-I-FRAME-STREAM-INF")) {
         return trimmed.replace(/URI="([^"]+)"/g, (_, uri) => {
           const abs = resolveGenericUrl(uri, baseUrl);
-          if (abs.includes("ultracloud.cc") || abs.includes("piltover.li")) return `URI="/aes-key?u=${encodeURIComponent(abs)}"`;
+          if (abs.includes("ultracloud.cc") || abs.includes("piltover.li") || abs.includes("keeply.top")) return `URI="/aes-key?u=${encodeURIComponent(abs)}${refEnc}"`;
           return `URI="/generic-seg?u=${encodeURIComponent(abs)}${refEnc}"`;
         });
       }
@@ -307,9 +307,10 @@ router.get("/generic-media.m3u8", (req, res) => {
 router.get("/aes-key", async (req, res) => {
   const targetUrl = req.query.u ? decodeURIComponent(req.query.u) : null;
   if (!targetUrl) return res.status(400).end();
+  const referer = req.query.ref ? decodeURIComponent(req.query.ref) : "https://strm.cx/";
   try {
     const r = await fetch(targetUrl, {
-      headers: { "Referer": "https://www.miruro.tv/", "Origin": "https://www.miruro.tv", "User-Agent": "Mozilla/5.0 Chrome/137" },
+      headers: genericHeaders(referer),
       signal: AbortSignal.timeout(10000),
     });
     if (!r.ok) return res.status(r.status).end();
