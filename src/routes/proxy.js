@@ -223,7 +223,20 @@ router.get("/flixcloud-seg", async (req, res) => {
 
 // ── Generic HLS proxy ────────────────────────────────────────────────────────
 const genericMediaCache = new Map();
-function genericHeaders(referer) {
+function genericHeaders(referer, targetUrl = "") {
+  const isZilla = targetUrl.includes("player.zilla-networks.com");
+  if (isZilla) {
+    return {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/154.0.0.0 Safari/537.36",
+      "Accept": "*/*",
+      "Accept-Language": "es-419,es-US;q=0.9,es;q=0.8,en;q=0.7",
+      "Cache-Control": "no-cache",
+      "Pragma": "no-cache",
+      "Sec-Fetch-Dest": "empty",
+      "Sec-Fetch-Mode": "cors",
+      "Sec-Fetch-Site": "same-origin",
+    };
+  }
   return {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
     "Accept": "*/*",
@@ -275,7 +288,7 @@ router.get("/generic-stream.m3u8", async (req, res) => {
   res.setHeader("Content-Type", "application/vnd.apple.mpegurl");
   setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
   try {
-    const r = await fetch(targetUrl, { headers: genericHeaders(referer), signal: AbortSignal.timeout(20000) });
+    const r = await fetch(targetUrl, { headers: genericHeaders(referer, targetUrl), signal: AbortSignal.timeout(20000) });
     if (!r.ok) {
       if (r.status === 403 || r.status === 404) invalidateStreamsContainingUrl(targetUrl);
       return res.status(502).json({ error: `generic upstream: ${r.status}` });
@@ -310,7 +323,7 @@ router.get("/aes-key", async (req, res) => {
   const referer = req.query.ref ? decodeURIComponent(req.query.ref) : "https://strm.cx/";
   try {
     const r = await fetch(targetUrl, {
-      headers: genericHeaders(referer),
+      headers: genericHeaders(referer, targetUrl),
       signal: AbortSignal.timeout(10000),
     });
     if (!r.ok) return res.status(r.status).end();
@@ -328,7 +341,7 @@ router.get("/generic-seg", async (req, res) => {
   const referer = req.query.ref ? decodeURIComponent(req.query.ref) : null;
   const isPlaylistUrl = /\.m3u8(\?|$)/i.test(targetUrl.split("?")[0]);
   try {
-    const r = await fetch(targetUrl, { headers: genericHeaders(referer), signal: AbortSignal.timeout(20000) });
+    const r = await fetch(targetUrl, { headers: genericHeaders(referer, targetUrl), signal: AbortSignal.timeout(20000) });
     if (!r.ok) {
       if (r.status === 403 || r.status === 404) invalidateStreamsContainingUrl(targetUrl);
       return res.status(r.status).end();
@@ -542,7 +555,7 @@ router.get("/dash-proxy.mpd", async (req, res) => {
   const referer = req.query.ref ? decodeURIComponent(req.query.ref) : null;
   const proxyBase = getProxyBase(req);
   try {
-    const r = await fetch(targetUrl, { headers: genericHeaders(referer), signal: AbortSignal.timeout(20000) });
+    const r = await fetch(targetUrl, { headers: genericHeaders(referer, targetUrl), signal: AbortSignal.timeout(20000) });
     if (!r.ok) return res.status(r.status).json({ error: `dash upstream: ${r.status}` });
     let mpd = await r.text();
     const firstPeriodIdx = mpd.indexOf("<Period");

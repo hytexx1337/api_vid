@@ -751,9 +751,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const proxyBase = getProxyBase(req);
   const perf = createAnimePerfLogger(anilistId, episode);
 
-  // v14: invalida bundles viejos tras mejorar el matching de animeav1
-  // (temporadas con II / Season 2 / 2nd Season, etc.).
-  const cacheKey = `streams:anime:v14:${anilistId}:${episode}`;
+      // v15: invalida bundles con proxy_url viejo de zilla-networks en animeav1.
+      const cacheKey = `streams:anime:v15:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v11:${anilistId}:${episode}`;
   const respKey = `resp:${cacheKey}:${proxyBase}`;
   const cachedBody = cacheGet(respKey);
@@ -916,6 +915,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
         const s = makeAnimeStream(proxyBase, url, "auto", lang, originalProvider);
         if (streamProvider === "upnshare") {
           s.proxy_url = `${proxyBase}/upn-stream.m3u8?u=${encodeURIComponent(cfUrl)}`;
+        } else if (url?.includes("player.zilla-networks.com")) {
+          s.proxy_url = `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(url)}&ref=${encodeURIComponent("https://player.zilla-networks.com/")}`;
         } else if (streamProvider === "voe") {
           s.proxy_url = `${proxyBase}/generic-stream.m3u8?u=${encodeURIComponent(url)}`;
         } else if (streamProvider === "mp4upload") {
