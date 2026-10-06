@@ -35,22 +35,12 @@ const TARGETS = [
   { host: "https://api.wecollege.net", route: "munich", suffix: "sources" },
 ];
 
-const FETCH_TIMEOUT = 15000;
+const SEED_TIMEOUT = 5000;
+const FETCH_TIMEOUT = 8000;
+const PRIMARY_TARGET_COUNT = 6;
 
 function fmtErr(err) {
   return err?.message || String(err);
-}
-
-async function fetchTextWithCurlFallback(url, { headers, timeoutMs, label }) {
-  try {
-    const r = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
-    if (!r.ok) throw new Error(`${label} HTTP ${r.status}`);
-    return await r.text();
-  } catch (fetchErr) {
-    const curlRes = await curlFetch(url, { headers, timeoutMs });
-    if (!curlRes.ok) throw new Error(`${label} HTTP ${curlRes.status} (fetch=${fmtErr(fetchErr)})`);
-    return await curlRes.text();
-  }
 }
 
 // ---------- cache ----------
@@ -74,16 +64,9 @@ async function getSeed(host, mediaId) {
   const e = _seeds.get(key);
   if (e && e.expiresAt - 5000 > Date.now()) return e.seed;
   const url = `${host}/seed?mediaId=${mediaId}`;
-  let j;
-  try {
-    const r = await fetch(url, { headers: H, signal: AbortSignal.timeout(10000) });
-    if (!r.ok) throw new Error(`vidy seed HTTP ${r.status}`);
-    j = await r.json();
-  } catch (fetchErr) {
-    const r = await curlFetch(url, { headers: H, timeoutMs: 10000 });
-    if (!r.ok) throw new Error(`vidy seed HTTP ${r.status} (fetch=${fmtErr(fetchErr)})`);
-    j = await r.json();
-  }
+  const r = await curlFetch(url, { headers: H, timeoutMs: SEED_TIMEOUT });
+  if (!r.ok) throw new Error(`vidy seed HTTP ${r.status}`);
+  const j = await r.json();
   if (!j?.seed) throw new Error("vidy seed payload invalid");
   const ttl = j.ttlMs ?? 30000;
   _seeds.set(key, { seed: j.seed, expiresAt: Date.now() + ttl });
@@ -114,18 +97,15 @@ async function fetchTargetSources(t, { title, mediaType, year, tmdbId, imdbId, s
     params.set("seasonId", String(season));
   }
   const url = `${t.host}/${t.route}/${t.suffix}?${params}`;
-  let body;
-  try {
-    body = await fetchTextWithCurlFallback(url, {
-      headers: H,
-      timeoutMs: FETCH_TIMEOUT,
-      label: `vidy ${t.route}`,
-    });
-  } catch (error) {
-    const e = new Error(error.message);
-    e.status = error.status;
+  const response = await curlFetch(url, { headers: H, timeoutMs: FETCH_TIMEOUT }).catch((error) => {
+    throw new Error(`${t.route}: ${fmtErr(error)}`);
+  });
+  if (!response.ok) {
+    const e = new Error(`vidy ${t.route} HTTP ${response.status}`);
+    e.status = response.status;
     throw e;
   }
+  const body = await response.text();
   return JSON.parse(decryptVidy(body, seed, String(tmdbId)));
 }
 
@@ -156,39 +136,14 @@ function normSubs(subs) {
     .filter(s => s.url);
 }
 
-// Resuelve todos los targets en paralelo y mergea. Devuelve
-// { url, type, provider, referer, subtitles, streams } — `url` es el mejor
-// (primer target con playlist/master) y `streams` la lista completa para
-// que el endpoint pueda meter varias entradas si quiere.
-async function resolveAll({ tmdbId, mediaType, title, year, imdbId, season, episode }) {
-  const type = mediaType === "tv" ? "tv" : "movie";
-  const useTargets = TARGETS.filter(t => !t.movieOnly || type === "movie");
-
-  // un seed por host
-  const seedByHost = new Map();
-  for (const t of useTargets) {
-    if (!seedByHost.has(t.host)) {
-      seedByHost.set(t.host, await getSeed(t.host, tmdbId).catch((error) => {
-        console.warn(`[vidy] seed ${t.host}: ${fmtErr(error)}`);
-        return null;
-      }));
-    }
-  }
-
-  const results = await Promise.allSettled(useTargets.map(async (t) => {
-    const seed = seedByHost.get(t.host);
-    if (!seed) throw new Error(`${t.route}: sin seed`);
-    const data = await fetchTargetSources(t, { title, mediaType: type, year, tmdbId, imdbId, season, episode }, seed);
-    return { t, data };
-  }));
-
+function mergeResolved(results, targets) {
   const allStreams = [];
   const allSubs = [];
   const seenUrls = new Set();
   const seenSubs = new Set();
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
-    const t = useTargets[i];
+    const t = targets[i];
     if (r.status !== "fulfilled") {
       console.warn(`[vidy] ${t.route}: ${r.reason?.message}`);
       continue;
@@ -204,6 +159,48 @@ async function resolveAll({ tmdbId, mediaType, title, year, imdbId, season, epis
       seenSubs.add(sub.url);
       allSubs.push(sub);
     }
+  }
+  return { allStreams, allSubs };
+}
+
+// Resuelve todos los targets en paralelo y mergea. Devuelve
+// { url, type, provider, referer, subtitles, streams } — `url` es el mejor
+// (primer target con playlist/master) y `streams` la lista completa para
+// que el endpoint pueda meter varias entradas si quiere.
+async function resolveAll({ tmdbId, mediaType, title, year, imdbId, season, episode }) {
+  const type = mediaType === "tv" ? "tv" : "movie";
+  const useTargets = TARGETS.filter(t => !t.movieOnly || type === "movie");
+  const primaryTargets = useTargets.slice(0, PRIMARY_TARGET_COUNT);
+  const fallbackTargets = useTargets.slice(PRIMARY_TARGET_COUNT);
+
+  // un seed por host
+  const seedByHost = new Map();
+  for (const t of useTargets) {
+    if (!seedByHost.has(t.host)) {
+      seedByHost.set(t.host, await getSeed(t.host, tmdbId).catch((error) => {
+        console.warn(`[vidy] seed ${t.host}: ${fmtErr(error)}`);
+        return null;
+      }));
+    }
+  }
+
+  const runTargets = (targets) => Promise.allSettled(targets.map(async (t) => {
+    const seed = seedByHost.get(t.host);
+    if (!seed) throw new Error(`${t.route}: sin seed`);
+    const data = await fetchTargetSources(t, { title, mediaType: type, year, tmdbId, imdbId, season, episode }, seed);
+    return { t, data };
+  }));
+
+  const primaryResults = await runTargets(primaryTargets);
+  const mergedPrimary = mergeResolved(primaryResults, primaryTargets);
+  let allStreams = mergedPrimary.allStreams;
+  let allSubs = mergedPrimary.allSubs;
+
+  if (!allStreams.length && fallbackTargets.length) {
+    const fallbackResults = await runTargets(fallbackTargets);
+    const mergedFallback = mergeResolved(fallbackResults, fallbackTargets);
+    allStreams = mergedFallback.allStreams;
+    allSubs = mergedFallback.allSubs;
   }
 
   if (!allStreams.length) return null;
