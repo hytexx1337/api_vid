@@ -1,16 +1,14 @@
 // scraper-vidy.js
 //
-// vidy.st (movy.sx) + espejo speedracelight — mismo backend encriptado:
+// vidy.st (movy.sx) — backend encriptado:
 //   GET {host}/seed?mediaId={tmdb} → {seed, ttlMs} (cache ~30s por mediaId)
 //   GET {host}/{route}/{suffix}?title&mediaType&year&episodeId&seasonId&tmdbId&imdbId&enc=2&seed
 //     → blob base64url cifrado → decryptVidy(seed, tmdbId) → {sources, subtitles, playlist}
 //
-// wecollege.net: rutas por ciudad (miami/boise/seattle/denver → /sources).
-// speedracelight.com: rutas por server (/sources-with-title):
-//   cdn=Yoru (4K), m4uhd=Breach (auto+subs), hdmovie=Vyse (Hindi/English —
-//   solo movies, para tv 500ea), lamovie/superflix/meine dan 500 o timeout.
-// Los streams son HLS en CDN propio (quietridge.top / cybergate.top) que
-// exige Referer: https://www.vidy.st/ — sin referer dan 403.
+// wecollege.net: mirrors por ciudad (/sources). Revisado en Oct 2026 contra
+// el player real de vidy: seattle/denver ya no existen, speedracelight está
+// devolviendo 502/sin seed y no aporta cobertura real. El HLS final sale por
+// moon.zenoak.top / olivewave.top y exige Referer: https://www.vidy.st/.
 
 import { decryptVidy } from "../../vendor/vidy-crypto.js";
 
@@ -18,16 +16,22 @@ const REFERER = "https://www.vidy.st/";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0";
 const H = { "User-Agent": UA, Referer: REFERER, Origin: "https://www.vidy.st" };
 
-// Targets por prioridad. movieOnly: hdmovie 500ea para tv.
-// m4uhd/sacado: playlist 200 pero sus segmentos en stillhaven.top dan 403
-// con cualquier referer — CDN muerto. denver/pontv.to a veces devuelve MP4.
+// Targets por prioridad. Los primeros mirrors son los que mejor cobertura
+// dieron en pruebas reales; el resto queda como fallback porque hay títulos
+// que aparecen solo en algunos mirrors.
 const TARGETS = [
-  { host: "https://api.wecollege.net",      route: "miami",   suffix: "sources" },
-  { host: "https://api.speedracelight.com", route: "cdn",     suffix: "sources-with-title" },
-  { host: "https://api.wecollege.net",      route: "boise",   suffix: "sources" },
-  { host: "https://api.speedracelight.com", route: "hdmovie", suffix: "sources-with-title", movieOnly: true },
-  { host: "https://api.wecollege.net",      route: "seattle", suffix: "sources" },
-  { host: "https://api.wecollege.net",      route: "denver",  suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "miami", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "boise", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "vegas", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "phoenix", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "atlanta", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "portland", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "dallas", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "paris", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "cancun", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "tampa", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "orlando", suffix: "sources" },
+  { host: "https://api.wecollege.net", route: "munich", suffix: "sources" },
 ];
 
 const FETCH_TIMEOUT = 15000;

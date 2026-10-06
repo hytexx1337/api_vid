@@ -1,6 +1,7 @@
 import { createDecipheriv } from "crypto";
 import fs from "fs";
 import { ANILIST_HEADERS } from "../config/constants.js";
+import { voeToM3U8 } from "./voe.js";
 
 const ANIMEAV1_BASE = "https://animeav1.com/media";
 
@@ -686,66 +687,6 @@ function extractMp4UploadUrls(html, section) { return extractServerUrls(html, se
 
 function playToM3U8(url) {
   return url.replace("/play/", "/m3u8/");
-}
-
-// ── Voe extractor ────────────────────────────────────────────────
-// voe.sx/e/{id} sirve una página stub con un redirect JS (no HTTP) hacia un
-// dominio random rotativo (ej. jeremyparticipantanything.com). Ahí vive el
-// embed real con <script type="application/json">["<blob>"]</script> — el
-// blob se decodifica con el algoritmo público "decryptF7" (consumet/
-// cloudstream, verificado por sniffing 2026-09-27): rot13 → stripear
-// separadores → base64 → shift -3 por char → reverse → base64 → JSON.
-// El m3u8 resultante (data.source) no requiere Referer para reproducir.
-const VOE_HEADERS = { "User-Agent": PAGE_HEADERS["User-Agent"], Referer: "https://voe.sx/" };
-
-function voeRot13(s) {
-  return s.replace(/[a-zA-Z]/g, (c) => {
-    const base = c <= "Z" ? 65 : 97;
-    return String.fromCharCode(((c.charCodeAt(0) - base + 13) % 26) + base);
-  });
-}
-function voeCharShift(s, shift) {
-  return [...s].map((c) => String.fromCharCode(c.charCodeAt(0) - shift)).join("");
-}
-function voeDecryptF7(blob) {
-  let v = voeRot13(blob);
-  for (const p of ["@$", "^^", "~@", "%?", "*~", "!!", "#&"]) v = v.split(p).join("_");
-  v = v.replace(/_/g, "");
-  v = Buffer.from(v, "base64").toString("utf8");
-  v = voeCharShift(v, 3);
-  v = v.split("").reverse().join("");
-  v = Buffer.from(v, "base64").toString("utf8");
-  return JSON.parse(v);
-}
-
-async function voeToM3U8(embedUrl, attempt = 0) {
-  try {
-    const r1 = await fetch(embedUrl, { headers: VOE_HEADERS, signal: AbortSignal.timeout(10000) });
-    if (!r1.ok) return null;
-    const html1 = await r1.text();
-
-    const redirectMatch = html1.match(/window\.location\.href\s*=\s*'([^']+)'/);
-    const realUrl = redirectMatch ? redirectMatch[1] : embedUrl;
-
-    const html2 = realUrl === embedUrl
-      ? html1
-      : await (await fetch(realUrl, { headers: VOE_HEADERS, signal: AbortSignal.timeout(10000) })).text();
-
-    const jsonMatch = html2.match(/<script type="application\/json">\["([^"]+)"\]<\/script>/);
-    if (!jsonMatch) return null;
-
-    const data = voeDecryptF7(jsonMatch[1]);
-    if (!data?.source) return null;
-
-    return {
-      url: data.source,
-      directUrl: data.direct_access_url || null,
-      thumbnailJpg: data.thumbnail || null,
-    };
-  } catch (e) {
-    if (attempt === 0) return voeToM3U8(embedUrl, 1);
-    return null;
-  }
 }
 
 // ── MP4Upload extractor ────────────────────────────────────────────

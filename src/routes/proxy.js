@@ -623,13 +623,39 @@ router.get("/ts-proxy", async (req, res) => {
       return res.redirect(302, upHeaders.location);
     }
     if (statusCode >= 400) return res.status(statusCode).json({ error: `Upstream error: ${statusCode}` });
+    const upstreamCt = upHeaders["content-type"] ?? "";
+    const isPlaylistUrl = /\.m3u8(?:$|[?#])|\.txt(?:$|[?#])/i.test(decodedUrl);
+    const isPlaylistCt = /mpegurl|x-mpegurl/i.test(upstreamCt);
+    const STRIP_HOSTS_RE = /ibyteimg\.com|tiktokcdn\.com|ipstatp\.com|yoot\.akirax\.buzz/i;
+    const needsStrip = STRIP_HOSTS_RE.test(decodedUrl);
+    if (!isPlaylistUrl && !isPlaylistCt && !needsStrip) {
+      let contentType = upstreamCt || "video/mp2t";
+      if (!contentType || /^application\/octet-stream/i.test(contentType) || /^font\/woff2/i.test(contentType)) {
+        contentType = /\.m4s(?:$|[?#])|\.mp4(?:$|[?#])|\/init-[^/]*\.mp4(?:$|[?#])/i.test(decodedUrl)
+          ? "video/mp4"
+          : "video/mp2t";
+      }
+      if (/^image\//i.test(contentType) || /^text\/html/i.test(contentType)) {
+        contentType = /\.m4s(?:$|[?#])|\.mp4(?:$|[?#])|\/init-[^/]*\.mp4(?:$|[?#])/i.test(decodedUrl)
+          ? "video/mp4"
+          : "video/mp2t";
+      }
+      res.status(statusCode);
+      res.setHeader("Content-Type", contentType);
+      if (upHeaders["content-length"]) res.setHeader("Content-Length", upHeaders["content-length"]);
+      if (upHeaders["content-range"]) res.setHeader("Content-Range", upHeaders["content-range"]);
+      if (upHeaders["accept-ranges"]) res.setHeader("Accept-Ranges", upHeaders["accept-ranges"]);
+      setCacheForResponse(res, contentType, decodedUrl);
+      body.on("error", () => { if (!res.headersSent) res.destroy(); });
+      res.on("close", () => body.destroy());
+      return body.pipe(res);
+    }
     const chunks = [];
     for await (const chunk of body) chunks.push(chunk);
     let buffer = Buffer.concat(chunks);
     // Megaplay CDN (tiktokcdn/akirax/etc): los segmentos TS vienen con 252
     // bytes de PNG falso al inicio — el player los corta (SegmentStrip,
     // STRIP_BYTES=252). Sin esto el segmento es un PNG inválido.
-    const STRIP_HOSTS_RE = /ibyteimg\.com|tiktokcdn\.com|ipstatp\.com|yoot\.akirax\.buzz/i;
     if (STRIP_HOSTS_RE.test(decodedUrl) && buffer.length > 252) {
       buffer = buffer.subarray(252);
     }

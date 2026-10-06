@@ -6,11 +6,13 @@
  *
  *  1. GET vidup.to/{movie|tv}/{tmdbId}[/{season}/{episode}]/ -> HTML
  *  2. Extraer token "en" o "token" embebido en el HTML (regex)
- *  3. GET enc-dec.app/api/enc-vidup?text={token} -> { servers, stream, token }
- *  4. POST {servers} con X-CSRF-Token -> blob cifrado
- *  5. POST enc-dec.app/api/dec-vidup {text: blob} -> lista de servers [{data,...}]
- *  6. POST {stream}/{data} -> blob cifrado
- *  7. POST enc-dec.app/api/dec-vidup {text: blob} -> { url, tracks, title, ... }
+ *  3. GET enc-dec.app/api/enc-vidup?text={token}&stage=1 -> { stage1, token }
+ *  4. POST {stage1} con X-CSRF-Token -> blob cifrado
+ *  5. GET enc-dec.app/api/enc-vidup?text={blob}&stage=2 -> { servers, stream, token }
+ *  6. POST {servers} con X-CSRF-Token -> blob cifrado
+ *  7. POST enc-dec.app/api/dec-vidup {text: blob} -> lista de servers [{data,...}]
+ *  8. POST {stream}/{data} -> blob cifrado
+ *  9. POST enc-dec.app/api/dec-vidup {text: blob} -> { url, tracks, title, ... }
  */
 
 const ORIGIN = "https://vidup.to";
@@ -91,13 +93,30 @@ export async function getVidupStream(tmdbId, mediaType, season, episode) {
 
     const match = html.match(/\\"(?:en|token)\\":\\"(.*?)\\"/);
     if (!match) throw new Error("vidup: no se encontró el token embebido en el HTML");
-    const text = match[1];
+    const embeddedToken = match[1];
 
-    const encRes = await fetch(`${ENC_DEC_API}/enc-vidup?text=${encodeURIComponent(text)}`, { signal: timeoutSignal() });
-    const encParts = validate(await encRes.json(), "enc-vidup");
-    const { servers, stream, token } = encParts;
+    const stage1Res = await fetch(
+      `${ENC_DEC_API}/enc-vidup?text=${encodeURIComponent(embeddedToken)}&stage=1`,
+      { signal: timeoutSignal() }
+    );
+    const stage1Parts = validate(await stage1Res.json(), "enc-vidup stage=1");
+    const stage1Headers = { ...BASE_HEADERS, "X-CSRF-Token": stage1Parts.token ?? "" };
 
-    const headersWithToken = { ...BASE_HEADERS, "X-CSRF-Token": token };
+    const stage1RelayRes = await relayFetch(stage1Parts.stage1, {
+      method: "POST",
+      headers: stage1Headers,
+      signal: timeoutSignal(),
+    });
+    const stage1Text = await stage1RelayRes.text();
+
+    const stage2Res = await fetch(
+      `${ENC_DEC_API}/enc-vidup?text=${encodeURIComponent(stage1Text)}&stage=2`,
+      { signal: timeoutSignal() }
+    );
+    const stage2Parts = validate(await stage2Res.json(), "enc-vidup stage=2");
+    const { servers, stream, token } = stage2Parts;
+
+    const headersWithToken = { ...BASE_HEADERS, "X-CSRF-Token": token ?? "" };
 
     const serversRes = await relayFetch(servers, { method: "POST", headers: headersWithToken, signal: timeoutSignal() });
     const serversEncrypted = await serversRes.text();

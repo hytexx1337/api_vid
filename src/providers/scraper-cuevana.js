@@ -1,5 +1,6 @@
 import vm from "vm";
 import crypto from "crypto";
+import { voeToM3U8 } from "./voe.js";
 
 /**
  * scraper-cuevana.js
@@ -235,7 +236,7 @@ async function fetchEmbed69Links(embed69Url) {
 async function extractFromEmbed(embedUrl, referer, name = "embed") {
   const r = await cfFetch(embedUrl, {
     headers: { "Referer": referer },
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(15000),
   });
   if (!r.ok) throw new Error(`${name} HTTP ${r.status}`);
   const html = await r.text();
@@ -248,6 +249,17 @@ async function extractFromEmbed(embedUrl, referer, name = "embed") {
 
 async function extractFromVidhide(embedUrl, referer) {
   return extractFromEmbed(embedUrl, referer, "vidhide");
+}
+
+async function extractFromVoe(embedUrl) {
+  const result = await voeToM3U8(embedUrl);
+  if (!result?.url) throw new Error("VOE protegido por challenge o sin stream");
+  return {
+    url: result.url,
+    headers: {},
+    thumbnailVtt: null,
+    thumbnailJpg: result.thumbnailJpg ?? null,
+  };
 }
 
 function base64urlDecode(str) {
@@ -327,7 +339,7 @@ async function extractFromStreamwish(originalUrl, referer) {
     try {
       const r = await cfFetch(mirrorUrl, {
         headers: { "Referer": referer },
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(15000),
       });
       if (!r.ok) { console.warn(`[cuevana] ${mirror} HTTP ${r.status}`); continue; }
       const html = await r.text();
@@ -355,11 +367,12 @@ async function resolveAllLat(allLinks) {
   if (!latServers?.length) throw new Error("No hay servidores LAT disponibles");
 
   const referer = `${BASE69}/`;
+  const findServer = (name) => latServers.find((s) => String(s.server || "").toLowerCase() === name);
 
   const resolvers = [
     {
       name: "streamwish",
-      entry: latServers.find(s => s.server === "streamwish"),
+      entry: findServer("streamwish"),
       resolve: async (entry) => {
         const result = await extractFromStreamwish(entry.url, referer);
         return {
@@ -370,8 +383,19 @@ async function resolveAllLat(allLinks) {
       },
     },
     {
+      name: "voe",
+      entry: findServer("voe"),
+      resolve: async (entry) => {
+        const result = await extractFromVoe(entry.url);
+        return {
+          url: result.url, headers: result.headers, server: "voe",
+          ...(result.thumbnailJpg && { thumbnailJpg: result.thumbnailJpg }),
+        };
+      },
+    },
+    {
       name: "vidhide",
-      entry: latServers.find(s => s.server === "vidhide"),
+      entry: findServer("vidhide"),
       resolve: async (entry) => {
         const result = await extractFromVidhide(entry.url, referer);
         return {
@@ -383,7 +407,7 @@ async function resolveAllLat(allLinks) {
     },
     {
       name: "filemoon",
-      entry: latServers.find(s => s.server === "filemoon"),
+      entry: findServer("filemoon"),
       resolve: async (entry) => {
         const result = await extractFromFilemoon(entry.url, referer);
         return {
