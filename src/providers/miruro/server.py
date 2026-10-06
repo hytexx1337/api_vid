@@ -1,7 +1,11 @@
 import base64
 import json
+import os
 import re
+import shutil
+import subprocess
 import time
+from urllib.parse import quote, urlencode
 
 from flask import Flask, jsonify, request, Response
 
@@ -18,6 +22,7 @@ BASE_URL = "https://barelystarted.miruro.tv"
 SEARCH_URL = f"{BASE_URL}/api/search/browse"
 SOURCES_URL = f"{BASE_URL}/api/sources"
 ANILIST_URL = "https://graphql.anilist.co"
+MIRURO_CF_WORKER = os.environ.get("MIRURO_CF_WORKER", "").strip().strip("`'\"").rstrip("/")
 
 STRMCX_ORIGIN = "https://strm.cx"
 PROXY_HOST = "https://s1.keeply.top/"
@@ -63,16 +68,61 @@ def _http_post(url, **kwargs):
     return http_requests.post(url, **kwargs, **_impersonation_kwargs())
 
 
+def _worker_url(target_url, params=None):
+    query = urlencode(params or {}, doseq=True)
+    full_url = f"{target_url}?{query}" if query else target_url
+    return f"{MIRURO_CF_WORKER}/fetch?url={quote(full_url, safe='')}"
+
+
+def _curl_get_text(url, headers=None, timeout=15):
+    curl_bin = shutil.which("curl")
+    if not curl_bin:
+        raise RuntimeError("curl binary not found")
+
+    cmd = [
+        curl_bin,
+        "-sS",
+        "-L",
+        "--max-time",
+        str(timeout),
+        "-A",
+        HEADERS["User-Agent"],
+    ]
+    for key, value in {**HEADERS, **(headers or {})}.items():
+        if key.lower() == "user-agent":
+            continue
+        cmd.extend(["-H", f"{key}: {value}"])
+    cmd.append(url)
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 5)
+    if proc.returncode != 0:
+        raise RuntimeError(f"curl failed {proc.returncode}: {proc.stderr[:180]}")
+    return proc.stdout
+
+
 def _json_get(url, params=None, headers=None, timeout=15):
-    res = _http_get(
-        url,
-        params=params,
-        headers={**HEADERS, **(headers or {})},
-        timeout=timeout,
-    )
+    if MIRURO_CF_WORKER and url.startswith(BASE_URL):
+        worker_url = _worker_url(url, params)
+        try:
+            return json.loads(_curl_get_text(worker_url, headers=headers, timeout=timeout))
+        except json.JSONDecodeError as exc:
+            preview = getattr(exc, "doc", "")[:180].replace("\n", " ")
+            raise RuntimeError(f"GET {url} invalid worker JSON: {preview}") from exc
+    else:
+        res = _http_get(
+            url,
+            params=params,
+            headers={**HEADERS, **(headers or {})},
+            timeout=timeout,
+        )
     if res.status_code != 200:
-        raise RuntimeError(f"GET {url} failed: {res.status_code}")
-    return res.json()
+        preview = res.text[:180].replace("\n", " ")
+        raise RuntimeError(f"GET {url} failed: {res.status_code} {preview}")
+    try:
+        return res.json()
+    except Exception as exc:
+        preview = res.text[:180].replace("\n", " ")
+        raise RuntimeError(f"GET {url} invalid JSON: {preview}") from exc
 
 
 def _anilist_titles(anilist_id):

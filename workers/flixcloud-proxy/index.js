@@ -1,7 +1,7 @@
 /**
  * workers/flixcloud-proxy/index.js
  *
- * Worker mínimo para relay de recursos de reanime.to + flixcloud/fetch*.flixcloud.cc
+ * Worker mínimo para relay de recursos de reanime.to + flixcloud/fetch*.flixcloud.cc + Miruro
  * y para diagnosticar si una URL devuelve contenido real o challenge HTML.
  *
  * Rutas:
@@ -18,7 +18,8 @@
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
 const REANIME_REFERER = "https://reanime.to/";
 const FLIX_REFERER = "https://flixcloud.cc/";
-const ALLOWED_HOST_RE = /(^|\.)((reanime\.to)|(flixcloud\.cc))$/i;
+const MIRURO_REFERER = "https://barelystarted.miruro.tv/";
+const ALLOWED_HOST_RE = /(^|\.)((reanime\.to)|(flixcloud\.cc)|(barelystarted\.miruro\.tv))$/i;
 const TEXT_PREVIEW_LIMIT = 1200;
 
 const CORS = {
@@ -50,14 +51,15 @@ function isProbablyChallenge(text, contentType) {
 function headersForTarget(target, request) {
   const parsed = new URL(target);
   const isReanime = /(^|\.)reanime\.to$/i.test(parsed.hostname);
-  const referer = isReanime ? REANIME_REFERER : FLIX_REFERER;
+  const isMiruro = /(^|\.)barelystarted\.miruro\.tv$/i.test(parsed.hostname);
+  const referer = isMiruro ? MIRURO_REFERER : isReanime ? REANIME_REFERER : FLIX_REFERER;
   return {
     "User-Agent": UA,
     "Referer": referer,
     "Origin": new URL(referer).origin,
     // reanime.to/search parece más sensible a headers que flixcloud; evitar
     // reenviar Accepts "ricos" del backend y mantener algo cercano a curl.
-    "Accept": isReanime ? "*/*" : (request.headers.get("accept") || "*/*"),
+    "Accept": isReanime ? "*/*" : (request.headers.get("accept") || "application/json, text/plain, */*"),
     "Accept-Language": request.headers.get("accept-language") || "es-419,es;q=0.9,en;q=0.8",
   };
 }
