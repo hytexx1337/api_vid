@@ -6,6 +6,7 @@ import { HEADERS, KAI_HTTP_PROXY, REANIME_CF_WORKER } from "../config/constants.
 const execFileAsync = promisify(execFile);
 const CURL_STATUS_MARKER = "__TRAE_STATUS__:";
 const CURL_CT_MARKER = "__TRAE_CT__:";
+const CURL_BIN = process.platform === "win32" ? "curl.exe" : "curl";
 
 export async function fetchJson(url, options = {}) {
   const res = await fetch(url, {
@@ -76,7 +77,7 @@ export async function curlWorkerFetch(targetUrl, { workerBase, timeoutMs = 15000
   const workerUrl = `${workerBase}/fetch?url=${encodeURIComponent(targetUrl)}`;
   const maxTimeSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
   const { stdout, stderr } = await execFileAsync(
-    "curl",
+    CURL_BIN,
     [
       "-sS",
       "-L",
@@ -117,7 +118,7 @@ export async function curlWorkerFetchBuffer(targetUrl, { workerBase, timeoutMs =
   const workerUrl = `${workerBase}/fetch?url=${encodeURIComponent(targetUrl)}`;
   const maxTimeSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
   const { stdout, stderr } = await execFileAsync(
-    "curl",
+    CURL_BIN,
     [
       "-sS",
       "-L",
@@ -156,6 +157,48 @@ export async function curlWorkerFetchBuffer(targetUrl, { workerBase, timeoutMs =
     buffer: async () => body,
     text: async () => body.toString("utf8"),
     json: async () => JSON.parse(body.toString("utf8")),
+  };
+}
+
+export async function curlFetch(url, { headers = {}, timeoutMs = 15000 } = {}) {
+  const maxTimeSeconds = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const headerArgs = [];
+  for (const [name, value] of Object.entries(headers)) {
+    if (value == null) continue;
+    headerArgs.push("-H", `${name}: ${value}`);
+  }
+
+  const { stdout, stderr } = await execFileAsync(
+    CURL_BIN,
+    [
+      "-sS",
+      "-L",
+      "--max-time",
+      String(maxTimeSeconds),
+      ...headerArgs,
+      "-w",
+      `\n${CURL_STATUS_MARKER}%{http_code}\n${CURL_CT_MARKER}%{content_type}\n`,
+      url,
+    ],
+    { maxBuffer: 10 * 1024 * 1024 }
+  );
+
+  const statusIndex = stdout.lastIndexOf(`\n${CURL_STATUS_MARKER}`);
+  if (statusIndex === -1) {
+    throw new Error(`curl fetch missing status marker${stderr ? `: ${stderr.trim()}` : ""}`);
+  }
+
+  const body = stdout.slice(0, statusIndex);
+  const meta = stdout.slice(statusIndex + 1).trim().split("\n");
+  const status = parseInt(meta.find((line) => line.startsWith(CURL_STATUS_MARKER))?.slice(CURL_STATUS_MARKER.length) || "0", 10);
+  const contentType = meta.find((line) => line.startsWith(CURL_CT_MARKER))?.slice(CURL_CT_MARKER.length) || "";
+
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    contentType,
+    text: async () => body,
+    json: async () => JSON.parse(body),
   };
 }
 

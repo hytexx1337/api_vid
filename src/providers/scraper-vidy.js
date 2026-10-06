@@ -11,6 +11,7 @@
 // moon.zenoak.top / olivewave.top y exige Referer: https://www.vidy.st/.
 
 import { decryptVidy } from "../../vendor/vidy-crypto.js";
+import { curlFetch } from "../lib/http.js";
 
 const REFERER = "https://www.vidy.st/";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0";
@@ -36,6 +37,22 @@ const TARGETS = [
 
 const FETCH_TIMEOUT = 15000;
 
+function fmtErr(err) {
+  return err?.message || String(err);
+}
+
+async function fetchTextWithCurlFallback(url, { headers, timeoutMs, label }) {
+  try {
+    const r = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+    if (!r.ok) throw new Error(`${label} HTTP ${r.status}`);
+    return await r.text();
+  } catch (fetchErr) {
+    const curlRes = await curlFetch(url, { headers, timeoutMs });
+    if (!curlRes.ok) throw new Error(`${label} HTTP ${curlRes.status} (fetch=${fmtErr(fetchErr)})`);
+    return await curlRes.text();
+  }
+}
+
 // ---------- cache ----------
 
 const _cache = new Map();
@@ -56,9 +73,18 @@ async function getSeed(host, mediaId) {
   const key = `${host}|${mediaId}`;
   const e = _seeds.get(key);
   if (e && e.expiresAt - 5000 > Date.now()) return e.seed;
-  const r = await fetch(`${host}/seed?mediaId=${mediaId}`, { headers: H, signal: AbortSignal.timeout(10000) });
-  if (!r.ok) throw new Error(`vidy seed HTTP ${r.status}`);
-  const j = await r.json();
+  const url = `${host}/seed?mediaId=${mediaId}`;
+  let j;
+  try {
+    const r = await fetch(url, { headers: H, signal: AbortSignal.timeout(10000) });
+    if (!r.ok) throw new Error(`vidy seed HTTP ${r.status}`);
+    j = await r.json();
+  } catch (fetchErr) {
+    const r = await curlFetch(url, { headers: H, timeoutMs: 10000 });
+    if (!r.ok) throw new Error(`vidy seed HTTP ${r.status} (fetch=${fmtErr(fetchErr)})`);
+    j = await r.json();
+  }
+  if (!j?.seed) throw new Error("vidy seed payload invalid");
   const ttl = j.ttlMs ?? 30000;
   _seeds.set(key, { seed: j.seed, expiresAt: Date.now() + ttl });
   return j.seed;
@@ -87,13 +113,19 @@ async function fetchTargetSources(t, { title, mediaType, year, tmdbId, imdbId, s
     params.set("episodeId", String(episode));
     params.set("seasonId", String(season));
   }
-  const r = await fetch(`${t.host}/${t.route}/${t.suffix}?${params}`, { headers: H, signal: AbortSignal.timeout(FETCH_TIMEOUT) });
-  if (!r.ok) {
-    const e = new Error(`vidy ${t.route} HTTP ${r.status}`);
-    e.status = r.status;
+  const url = `${t.host}/${t.route}/${t.suffix}?${params}`;
+  let body;
+  try {
+    body = await fetchTextWithCurlFallback(url, {
+      headers: H,
+      timeoutMs: FETCH_TIMEOUT,
+      label: `vidy ${t.route}`,
+    });
+  } catch (error) {
+    const e = new Error(error.message);
+    e.status = error.status;
     throw e;
   }
-  const body = await r.text();
   return JSON.parse(decryptVidy(body, seed, String(tmdbId)));
 }
 
@@ -136,7 +168,10 @@ async function resolveAll({ tmdbId, mediaType, title, year, imdbId, season, epis
   const seedByHost = new Map();
   for (const t of useTargets) {
     if (!seedByHost.has(t.host)) {
-      seedByHost.set(t.host, await getSeed(t.host, tmdbId).catch(() => null));
+      seedByHost.set(t.host, await getSeed(t.host, tmdbId).catch((error) => {
+        console.warn(`[vidy] seed ${t.host}: ${fmtErr(error)}`);
+        return null;
+      }));
     }
   }
 
