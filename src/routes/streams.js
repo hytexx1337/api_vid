@@ -371,6 +371,27 @@ function pickArchiveCandidates(streams, lang, priorityList) {
   return ordered;
 }
 
+function multiArchiveCoversLang(r2Archived, lang) {
+  const tracks = r2Archived?.MULTI?.audioTracks;
+  if (!Array.isArray(tracks) || !tracks.length) return false;
+  return tracks.some((track) => {
+    const code = String(track?.code || "").toUpperCase();
+    const rawLang = String(track?.lang || track?.id || "").toLowerCase();
+    if (code === lang) return true;
+    if (lang === "ENG-DUB") return rawLang === "en" || rawLang === "en-us";
+    if (lang === "ESP-LAT") return rawLang === "es" || rawLang === "es-mx" || rawLang === "es-419";
+    return false;
+  });
+}
+
+function archiveLangAlreadyCovered(r2Archived, lang) {
+  if (r2Archived?.[lang]) return true;
+  if (lang === "ENG-DUB" || lang === "ESP-LAT") {
+    return multiArchiveCoversLang(r2Archived, lang);
+  }
+  return false;
+}
+
 // Encola a R2 los idiomas que todavía no están archivados. proxy_url apunta
 // al dominio público (proxyBase); para el fetch interno del archivador se usa
 // loopback directo, evitando un salto de ida y vuelta por internet.
@@ -381,7 +402,7 @@ function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyB
   if (!isR2Configured()) return;
   const internalBase = `http://127.0.0.1:${process.env.PORT || 1337}`;
   for (const [lang, priorityList] of Object.entries(R2_AUTO_ARCHIVE_PRIORITY)) {
-    if (r2Archived[lang]) continue;
+    if (archiveLangAlreadyCovered(r2Archived, lang)) continue;
     if (isQueuedOrArchiving(anilistId, episode, lang)) continue;
     const candidates = pickArchiveCandidates(streams, lang, priorityList);
     if (!candidates.length) continue;
