@@ -61,6 +61,112 @@ export function unsealProxyPath(token) {
   return out.toString("utf8");
 }
 
+/**
+ * Cifra un JSON-valor arbitrario (generalmente query params de proxy)
+ * en un token opaco de un solo uso.
+ *
+ * Utiliza MISMA key (sha256(PROXY_SEAL_SECRET)) que sealProxyPath, PERO
+ * con IV ALEATORIO por llamada — nunca colisiona y siempre produce
+ * outputs distintos aunque el payload sea idéntico. No necesitamos
+ * cachear la URL sellada en este contexto (la cache real es de streams).
+ */
+export function sealQueryPayload(obj) {
+  const plaintext = Buffer.from(JSON.stringify(obj), "utf8");
+  const iv = crypto.randomBytes(IV_LEN);
+  const cipher = crypto.createCipheriv(ALGO, getKey(), iv);
+  const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return base64url(Buffer.concat([iv, tag, enc]));
+}
+
+/**
+ * Variante DETERMINÍSTICA de sealQueryPayload:
+ * - IV NO es aleatorio: se deriva como SHA256(JSON.stringify(payload))[:12]
+ * - Mismo {url,ref,ct} → Mismo token (misma URL sellada)
+ *
+ * Obligatorio para: sprite thumbnails del VTT (misma imagen = misma URL de
+ * proxy) → permite cachear la imagen y evitar 20x descargas redundantes de
+ * un mismo webp. Mantiene autenticidad AES-GCM (la key maestra sigue siendo
+ * la misma, el IV es único por contenido).
+ */
+export function sealQueryPayloadDeterministic(obj) {
+  const plaintext = Buffer.from(JSON.stringify(obj), "utf8");
+  // IV determinístico: 12 primeros bytes de SHA256(plaintext).
+  // Esto garantiza que payloads idénticos → IV idéntico → token idéntico.
+  const iv = crypto.createHash("sha256").update(plaintext).digest().subarray(0, IV_LEN);
+  const cipher = crypto.createCipheriv(ALGO, getKey(), iv);
+  const enc = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return base64url(Buffer.concat([iv, tag, enc]));
+}
+
+/**
+ * Inverso de sealQueryPayload. Devuelve el objeto original o null si el
+ * token es inválido / corrupto / sin key.
+ *
+ * FUNCIONA TANTO para tokens random IV como para deterministic IV:
+ * la estructura del buffer es la misma ([IV || tag || ct]), el descifrador
+ * no le importa cómo se generó el IV, solo que sea el correcto y que el
+ * tag coincida.
+ */
+export function tryUnsealQueryPayload(token) {
+  try {
+    if (!token || typeof token !== "string") return null;
+    const buf = base64urlDecode(token);
+    if (buf.length < IV_LEN + TAG_LEN) return null;
+    const iv = buf.slice(0, IV_LEN);
+    const tag = buf.slice(IV_LEN, IV_LEN + TAG_LEN);
+    const enc = buf.slice(IV_LEN + TAG_LEN);
+    const decipher = crypto.createDecipheriv(ALGO, getKey(), iv);
+    decipher.setAuthTag(tag);
+    const out = Buffer.concat([decipher.update(enc), decipher.final()]);
+    return JSON.parse(out.toString("utf8"));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Helper de URL de conveniencia: devuelve el query string parcial tipo
+ * `s=...` que debe ser concatenado a una ruta de proxy. No prefiere `?` ni
+ * `&` — lo decide quien lo usa.
+ */
+export function sealedQueryParam(obj) {
+  return `s=${encodeURIComponent(sealQueryPayload(obj))}`;
+}
+
+/**
+ * Misma helper que sealedQueryParam PERO con token determinístico (mismo
+ * payload → misma URL). Usar solo para recursos cacheables (thumbnails,
+ * sprites VTT, subtítulos estáticos).
+ */
+export function sealedQueryParamDeterministic(obj) {
+  return `s=${encodeURIComponent(sealQueryPayloadDeterministic(obj))}`;
+}
+
+/**
+ * Para campos crudos tipo stream.url, stream.thumbnailVtt (que el player
+ * NUNCA toca directamente pero quedan visibles en la respuesta) envolvemos
+ * el string original en un prefijo opaco `sealed:<token>`. No es URL usable
+ * directamente, pero mantiene reversibilidad 100% si hace falta debug.
+ *
+ * Si `value` no es string / es empty → devolver tal cual.
+ */
+export function maskRawUrl(value) {
+  if (typeof value !== "string" || !value) return value;
+  // Prefijo "sealed:" + token AES-GCM con PROXY_SEAL_SECRET
+  return "sealed:" + sealQueryPayload({ u: value });
+}
+
+/**
+ * Desarma maskRawUrl → string original.
+ */
+export function unmaskRawUrl(masked) {
+  if (typeof masked !== "string" || !masked.startsWith("sealed:")) return masked;
+  const p = tryUnsealQueryPayload(masked.slice(7));
+  return p && typeof p.u === "string" ? p.u : masked;
+}
+
 const PROXY_PATH_PATTERN =
   "(?:" +
   "proxy|ts-proxy|fetch|mp4-proxy|ghost-proxy|" +

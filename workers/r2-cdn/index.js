@@ -70,6 +70,10 @@ async function verifySig(secret, path, exp, sig) {
 
 function contentTypeFor(filename) {
   if (filename.startsWith("seg-")) return "video/mp2t";
+  // Salidas generadas por crunchyroll-downloader: video_00000.jpg y
+  // a0_00000.jpg/a1_00000.jpg son MPEG-TS disfrazados.
+  if (/^video_\d+\./.test(filename)) return "video/mp2t";
+  if (/^a\d+_\d+\./.test(filename)) return "video/mp2t";
   // Pistas de audio separadas archivadas desde masters con EXT-X-MEDIA
   // (ver processPlaylist en src/lib/hls-to-r2.js): aud- = MPEG-TS,
   // audf- = fMP4/CMAF.

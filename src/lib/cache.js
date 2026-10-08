@@ -52,6 +52,7 @@ function initDb() {
     for (const col of ["skip_intro_start", "skip_intro_end", "skip_outro_start", "skip_outro_end"]) {
       try { dbInstance.exec(`ALTER TABLE r2_archive ADD COLUMN ${col} REAL`); } catch { /* ya existe */ }
     }
+    try { dbInstance.exec(`ALTER TABLE r2_archive ADD COLUMN tracks_json TEXT`); } catch { /* ya existe */ }
     // Subtítulos subidos manualmente (panel r2-panel en VPS externo).
     // file es el nombre del objeto en R2 bajo subs/ (ej: "manual-abc123.vtt").
     dbInstance.exec(`
@@ -148,6 +149,35 @@ export function cacheDelete(key) {
   }
 }
 
+export function cacheFlushAll() {
+  const memBefore = cache.size;
+  cache.clear();
+  let diskBefore = 0;
+  if (db) {
+    try {
+      const beforeRow = db.prepare(`SELECT COUNT(*) AS c FROM stream_cache`).get();
+      diskBefore = beforeRow?.c ?? 0;
+      db.prepare(`DELETE FROM stream_cache`).run();
+    } catch (e) {
+      console.warn("[cache] cacheFlushAll disk error:", e.message);
+    }
+  }
+  console.log(`[cache] flush-all: memoria=${memBefore} items borrados, disco=${diskBefore} rows borradas (streams: + reanime:)`);
+  return { memCleared: memBefore, diskCleared: diskBefore };
+}
+
+export function cacheDeleteAnimeResponseCache(animeId, episode) {
+  const marker = `:${animeId}:${episode}:`;
+  let deleted = 0;
+  for (const key of cache.keys()) {
+    if (key.startsWith("resp:streams:anime:") && key.includes(marker)) {
+      cache.delete(key);
+      deleted++;
+    }
+  }
+  return deleted;
+}
+
 // Devuelve todas las cache_key persistidas que empiezan con el prefijo dado
 // (usado por el verificador diario de streams).
 export function listPersistedKeys(prefix) {
@@ -194,14 +224,32 @@ export function invalidateStreamsContainingUrl(url) {
 // `${slug}/master.m3u8` + segmentos. No tiene TTL: el objeto queda ahí hasta
 // que se borre a mano o se reemplace.
 // skipIntro/skipOutro: [start, end] en segundos, o null/undefined si no hay.
-export function upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes, skipIntro, skipOutro }) {
+function normalizeR2Tracks(tracks) {
+  if (!tracks || typeof tracks !== "object") return null;
+  const audioTracks = Array.isArray(tracks.audioTracks) ? tracks.audioTracks : [];
+  const subtitleTracks = Array.isArray(tracks.subtitleTracks) ? tracks.subtitleTracks : [];
+  if (!audioTracks.length && !subtitleTracks.length) return null;
+  return { audioTracks, subtitleTracks };
+}
+
+function parseR2Tracks(raw) {
+  if (!raw) return null;
+  try {
+    return normalizeR2Tracks(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+export function upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes, skipIntro, skipOutro, tracks }) {
   if (!db) return false;
   try {
     const [iStart, iEnd] = Array.isArray(skipIntro) ? skipIntro : [null, null];
     const [oStart, oEnd] = Array.isArray(skipOutro) ? skipOutro : [null, null];
+    const tracksJson = normalizeR2Tracks(tracks) ? JSON.stringify(normalizeR2Tracks(tracks)) : null;
     db.prepare(`
-      INSERT INTO r2_archive (anime_id, episode, lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO r2_archive (anime_id, episode, lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end, tracks_json)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(anime_id, episode, lang) DO UPDATE SET
         slug = excluded.slug,
         source_provider = excluded.source_provider,
@@ -210,8 +258,9 @@ export function upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, 
         skip_intro_start = excluded.skip_intro_start,
         skip_intro_end = excluded.skip_intro_end,
         skip_outro_start = excluded.skip_outro_start,
-        skip_outro_end = excluded.skip_outro_end
-    `).run(String(animeId), String(episode), lang, slug, sourceProvider ?? null, bytes ?? null, Date.now(), iStart ?? null, iEnd ?? null, oStart ?? null, oEnd ?? null);
+        skip_outro_end = excluded.skip_outro_end,
+        tracks_json = COALESCE(excluded.tracks_json, r2_archive.tracks_json)
+    `).run(String(animeId), String(episode), lang, slug, sourceProvider ?? null, bytes ?? null, Date.now(), iStart ?? null, iEnd ?? null, oStart ?? null, oEnd ?? null, tracksJson);
     return true;
   } catch (e) {
     console.warn("[cache] upsertR2Archive error:", e.message);
@@ -225,14 +274,17 @@ export function getR2Archive(animeId, episode) {
   if (!db) return {};
   try {
     const rows = db.prepare(
-      `SELECT lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end FROM r2_archive WHERE anime_id = ? AND episode = ?`
+      `SELECT lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end, tracks_json FROM r2_archive WHERE anime_id = ? AND episode = ?`
     ).all(String(animeId), String(episode));
     const out = {};
     for (const r of rows) {
+      const tracks = parseR2Tracks(r.tracks_json);
       out[r.lang] = {
         slug: r.slug, sourceProvider: r.source_provider, bytes: r.bytes, archivedAt: r.archived_at,
         skipIntro: r.skip_intro_start != null ? [r.skip_intro_start, r.skip_intro_end] : null,
         skipOutro: r.skip_outro_start != null ? [r.skip_outro_start, r.skip_outro_end] : null,
+        ...(tracks?.audioTracks?.length && { audioTracks: tracks.audioTracks }),
+        ...(tracks?.subtitleTracks?.length && { subtitleTracks: tracks.subtitleTracks }),
       };
     }
     return out;
@@ -247,7 +299,7 @@ export function listAllR2Archive() {
   if (!db) return [];
   try {
     return db.prepare(
-      `SELECT anime_id, episode, lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end FROM r2_archive`
+      `SELECT anime_id, episode, lang, slug, source_provider, bytes, archived_at, skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end, tracks_json FROM r2_archive`
     ).all();
   } catch (e) {
     console.warn("[cache] listAllR2Archive error:", e.message);

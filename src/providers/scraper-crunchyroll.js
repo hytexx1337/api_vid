@@ -50,6 +50,24 @@ const CR_WWW    = "https://www.crunchyroll.com";
 const CR_LOCALE = "en-US";
 const CINE_API  = process.env.CINE_API ?? "https://api.cineparatodos.lat";
 
+async function getEpisodeTitleFromAniZip(anilistId, episode) {
+  try {
+    const cacheKey = `anizip:${anilistId}`;
+    let data = cacheGet(cacheKey);
+    if (!data) {
+      const url = `https://api.ani.zip/mappings?anilist_id=${encodeURIComponent(anilistId)}`;
+      const r = await fetch(url, { signal: AbortSignal.timeout(2500) });
+      if (!r.ok) return null;
+      data = await r.json();
+      cacheSet(cacheKey, data, 24 * 60 * 60 * 1000);
+    }
+    const ep = data?.episodes?.[String(episode)];
+    return ep?.title?.en ?? ep?.title?.["x-jat"] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function getEpisodeTitleFromCineApi(anilistId, episode) {
   try {
     const url = `${CINE_API}/anime/${anilistId}/season/episode/${episode}?lang=en-US`;
@@ -60,6 +78,11 @@ async function getEpisodeTitleFromCineApi(anilistId, episode) {
   } catch {
     return null;
   }
+}
+
+async function getEpisodeTitle(anilistId, episode) {
+  return await getEpisodeTitleFromAniZip(anilistId, episode)
+      ?? await getEpisodeTitleFromCineApi(anilistId, episode);
 }
 const UA        = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36";
 
@@ -372,15 +395,17 @@ async function getMovies(movieListingId) {
 /**
  * Llama a /playback/v3/{episodeId}/web/chrome/play y devuelve captions + subtitles.
  */
-async function getPlayback(episodeId) {
-  const cacheKey = `cr:playback:${episodeId}`;
+async function getPlayback(episodeId, preferredAudioLanguage = null) {
+  const cacheKey = `cr:playback:${episodeId}:${preferredAudioLanguage ?? "default"}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
   const token     = await getToken();
   const cookieStr = getCookieString();
+  const url = new URL(`${CR_WWW}/playback/v3/${episodeId}/web/chrome/play`);
+  if (preferredAudioLanguage) url.searchParams.set("preferred_audio_language", preferredAudioLanguage);
 
-  const r = await fetch(`${CR_WWW}/playback/v3/${episodeId}/web/chrome/play`, {
+  const r = await fetch(url, {
     headers: {
       "Authorization": `Bearer ${token}`,
       "Cookie":        cookieStr ?? "",
@@ -396,6 +421,7 @@ async function getPlayback(episodeId) {
   }
 
   const data = await r.json();
+  if (preferredAudioLanguage) console.log(`[crunchyroll] playback preferred_audio_language=${preferredAudioLanguage}`);
   console.log(`[crunchyroll] session: renewSeconds=${data.session?.renewSeconds}, expiresIn=${data.session?.sessionExpirationSeconds}s, usesLimits=${data.session?.usesStreamLimits}`);
   console.log(`[crunchyroll] raw captions:  [${Object.keys(data.captions  ?? {}).join(", ")}]`);
   console.log(`[crunchyroll] raw subtitles: [${Object.keys(data.subtitles ?? {}).join(", ")}]`);
@@ -547,7 +573,7 @@ export async function getCRSubtitles(anilistId, episode, titleRomaji, seasonNumb
   console.log(`[crunchyroll] episodio "${ep.title}" (id=${ep.id})`);
 
   // 4. Obtener playback del episodio
-  const playback    = await getPlayback(ep.id);
+  const playback    = await getPlayback(ep.id, "ja-JP").catch(() => getPlayback(ep.id));
   const hasCaptions = Object.values(playback.captions ?? {}).some(c => c.url);
 
   // Si hay captions → es un dub: tomar solo VTT CC (el ASS del dub son signs/titles, sin diálogo).
@@ -561,8 +587,7 @@ export async function getCRSubtitles(anilistId, episode, titleRomaji, seasonNumb
   if (subVersionId) {
     console.log(`[crunchyroll] versión original (ja-JP): ${subVersionId} — buscando ASS multiidioma`);
     try {
-      await new Promise(r => setTimeout(r, 600));
-      const subPlayback = await getPlayback(subVersionId);
+      const subPlayback = await getPlayback(subVersionId, "ja-JP").catch(() => getPlayback(subVersionId));
       const subTracks   = parsePlaybackTracks(subPlayback);
       let added = 0;
       for (const t of subTracks) {
@@ -715,7 +740,7 @@ async function getCRMovieSubtitles(anilistId, titleRomaji, titleEnglish) {
     }
   }
 
-  const playback    = await getPlayback(epId);
+  const playback    = await getPlayback(epId, "ja-JP").catch(() => getPlayback(epId));
   const hasCaptions = Object.values(playback.captions ?? {}).some(c => c.url);
   const tracks = hasCaptions
     ? parsePlaybackTracks(playback).filter(t => t.format === "vtt")
@@ -727,8 +752,7 @@ async function getCRMovieSubtitles(anilistId, titleRomaji, titleEnglish) {
     if (dubVersionId) {
       console.log(`[crunchyroll] versión en-US (dub): ${dubVersionId} — buscando VTT CC`);
       try {
-        await new Promise(r => setTimeout(r, 600));
-        const dubPlayback = await getPlayback(dubVersionId);
+        const dubPlayback = await getPlayback(dubVersionId).catch(() => getPlayback(dubVersionId, "en-US"));
         const dubTracks   = parsePlaybackTracks(dubPlayback).filter(t => t.format === "vtt");
         tracks.push(...dubTracks);
         if (dubTracks.length) console.log(`[crunchyroll] +${dubTracks.length} VTT desde dub en-US`);
@@ -742,8 +766,7 @@ async function getCRMovieSubtitles(anilistId, titleRomaji, titleEnglish) {
   if (subVersionId) {
     console.log(`[crunchyroll] versión original (ja-JP): ${subVersionId} — buscando ASS multiidioma`);
     try {
-      await new Promise(r => setTimeout(r, 600));
-      const subPlayback = await getPlayback(subVersionId);
+      const subPlayback = await getPlayback(subVersionId, "ja-JP").catch(() => getPlayback(subVersionId));
       const subTracks   = parsePlaybackTracks(subPlayback);
       let added = 0;
       for (const t of subTracks) {
@@ -829,9 +852,9 @@ async function resolveCRSubs(anilistId, episode) {
     getAnilistInfo(anilistId).catch(() => null),
     anilistToImdb(anilistId).catch(() => null),
     getEpisodeOffset(anilistId).catch(() => 0),
-    getEpisodeTitleFromCineApi(anilistId, episode).catch(() => null),
+    getEpisodeTitle(anilistId, episode).catch(() => null),
   ]);
-  if (episodeTitle) console.log(`[crunchyroll] título del episodio desde CINE_API: "${episodeTitle}"`);
+  if (episodeTitle) console.log(`[crunchyroll] título del episodio: "${episodeTitle}"`);
 
   const titleRomaji  = anilistInfo?.titleRomaji  ?? String(anilistId);
   const titleEnglish = anilistInfo?.titleEnglish ?? null;
@@ -857,11 +880,44 @@ async function resolveCRSubs(anilistId, episode) {
   const assTracks = allTracks.filter(t => t.format === "ass" && WANTED_ASS_LANGS.has(t.lang));
   const tracksToDownload = [...vttTracks, ...assTracks];
 
-  console.log(`[crunchyroll] descargando ${vttTracks.length} VTT + ${assTracks.length} ASS (${assTracks.map(t => t.lang).join(", ") || "ninguno"})`);
+  console.log(`[crunchyroll] raw directo ${vttTracks.length} VTT + ${assTracks.length} ASS (${assTracks.map(t => t.lang).join(", ") || "ninguno"}); descarga/R2 queda en background`);
 
-  // 4. Descargar VTT (todos) y ASS (solo idiomas deseados). Si R2 está
-  // configurado, subir directo ahí (evita servir desde el VPS, que a veces
-  // responde lento/timeout); si no, caer al disco local como siempre.
+  // 4. HOTPATH: servir URLs raw firmadas de CR directo. Ya verificamos que
+  // funcionan sin proxy desde distintas IPs. La descarga + subida a R2 sigue
+  // existiendo, pero corre en background para que el próximo hit use cache
+  // persistente sin bloquear esta response.
+  const hotTracks = tracksToDownload.map(t => ({
+    label: t.label,
+    lang: t.lang,
+    format: t.format,
+    url: t.url,
+    raw: true,
+  }));
+
+  if (tracksToDownload.length) {
+    persistCRTracksInBackground(idxKey, memKey, tracksToDownload);
+  }
+
+  cacheSet(memKey, hotTracks, 10 * 60 * 1000);
+  return hotTracks;
+}
+
+function persistCRTracksInBackground(idxKey, memKey, tracksToDownload) {
+  (async () => {
+    try {
+      const validTracks = await persistCRTracks(tracksToDownload);
+      if (validTracks.length) {
+        saveCRIndex(idxKey, validTracks);
+      }
+      cacheSet(memKey, validTracks, 24 * 60 * 60 * 1000);
+      console.log(`[crunchyroll:bg] subs persistidos ${idxKey}: ${validTracks.length}/${tracksToDownload.length}`);
+    } catch (e) {
+      console.warn(`[crunchyroll:bg] persist fallo ${idxKey}: ${e.message}`);
+    }
+  })();
+}
+
+async function persistCRTracks(tracksToDownload) {
   const r2Ready = isR2Configured();
   const localTracks = await Promise.all(tracksToDownload.map(async t => {
     const hash     = createHash("sha1").update(t.url).digest("hex");
@@ -894,12 +950,5 @@ async function resolveCRSubs(anilistId, episode) {
   }));
 
   const validTracks = localTracks.filter(t => t.file);
-
-  // 5. Persistir en índice
-  if (validTracks.length) {
-    saveCRIndex(idxKey, validTracks);
-  }
-
-  cacheSet(memKey, validTracks, 24 * 60 * 60 * 1000);
   return validTracks;
 }

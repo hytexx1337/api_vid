@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "node:crypto";
 import fs from "fs";
 import { STREAM_TTL, REANIME_STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
 import { cacheGet, cacheSet, cacheDelete, timed, getR2Archive, getManualTracks, getEpisodeThumbnails, upsertEpisodeThumbnail } from "../lib/cache.js";
@@ -7,8 +8,8 @@ import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { isR2Configured } from "../lib/hls-to-r2.js";
 import { archiveSubtitleTracksToR2, archiveThumbnailVttToR2 } from "../lib/reanime-r2.js";
 import { getProxyBase } from "../lib/proxy.js";
-import { buildTracks, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel, detectTrackLang } from "../lib/subtitles.js";
-import { sealProxyUrls } from "../lib/proxy-seal.js";
+import { buildTracks, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel, detectTrackLang, normalizeSubtitleTracks } from "../lib/subtitles.js";
+import { sealProxyUrls, sealedQueryParam, sealedQueryParamDeterministic, sealQueryPayload, maskRawUrl, unmaskRawUrl } from "../lib/proxy-seal.js";
 import { filterPlayableStreams, prewarmVerify } from "../lib/stream-verify.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
 import {
@@ -18,7 +19,10 @@ import {
   makeVixsrcStream,
   makeAnimeStream,
   sortStreams,
+  filterBrokenProviderLangCombos,
+  normalizeProxyStreamTypes,
   assignDisplayProviders,
+  publicDownloadServer,
   mapMovieTvLang,
   normalizeLang,
 } from "../lib/stream-formatter.js";
@@ -48,8 +52,87 @@ import {
 
 const router = Router();
 
-// Rate limit para endpoints JSON: 60 req/min por IP.
-router.use(createRateLimiter({ windowMs: 60_000, max: 60, message: "Too many stream requests" }));
+// ── Encryption helpers ────────────────────────────────────────────────────────
+function parseBoolEnv(rawValue, fallback) {
+  const v = String(rawValue ?? "").trim().toLowerCase();
+  if (!v) return fallback;
+  if (["1", "true", "yes", "on"].includes(v)) return true;
+  if (["0", "false", "no", "off"].includes(v)) return false;
+  return fallback;
+}
+
+const PLAYER_STREAM_ENCRYPTION_ENABLED = parseBoolEnv(
+  process.env.PLAYER_STREAM_ENCRYPTION_ENABLED,
+  process.env.NODE_ENV === "production"
+);
+
+const STREAM_ENVELOPE_ALG = "AES-GCM";
+const STREAM_ENVELOPE_CIPHER = "aes-256-gcm";
+const STREAM_ENVELOPE_IV_LEN = 12;
+const STREAM_ENVELOPE_DEK_LEN = 32;
+const STREAM_ENVELOPE_TAG_LEN = 16;
+
+function bufferToBase64url(buf) {
+  if (Buffer.isBuffer(buf)) return buf.toString("base64url");
+  return Buffer.from(buf).toString("base64url");
+}
+
+function createRandomStreamDek() {
+  return crypto.randomBytes(STREAM_ENVELOPE_DEK_LEN);
+}
+
+function encryptJsonEnvelope(payload, sessionExp = 0) {
+  const plaintext = Buffer.from(JSON.stringify(payload), "utf8");
+  const iv = crypto.randomBytes(STREAM_ENVELOPE_IV_LEN);
+  const dek = createRandomStreamDek();
+  const cipher = crypto.createCipheriv(STREAM_ENVELOPE_CIPHER, dek, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const data = Buffer.concat([ciphertext, tag]);
+  const envelope = {
+    encrypted: true,
+    alg: STREAM_ENVELOPE_ALG,
+    iv: bufferToBase64url(iv),
+    data: bufferToBase64url(data),
+    key: bufferToBase64url(dek),
+  };
+  if (Number(sessionExp) > 0) envelope.exp = Number(sessionExp);
+  return envelope;
+}
+
+function setSensitiveResponseHeaders(res) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
+}
+
+// ── Rate limit más estricto para streams endpoints ────────────────────────────
+function getStreamsAuthKey(req) {
+  const raw = (req.headers["x-api-key"] ?? req.query?.key ?? "unknown-key");
+  return crypto.createHash("sha256").update(String(raw)).digest("hex").slice(0, 24);
+}
+
+const limitStreamsByIp = createRateLimiter({
+  windowMs: 60_000,
+  max: 60,
+  message: "Too many stream requests (ip)",
+});
+
+const limitStreamsByAuth = createRateLimiter({
+  windowMs: 60_000,
+  max: 150,
+  message: "Too many stream requests (key)",
+  keyGenerator: (req) => `streams-auth:${getStreamsAuthKey(req)}`,
+});
+
+router.use((req, res, next) => {
+  limitStreamsByIp(req, res, (errA) => {
+    if (errA) return next(errA);
+    if (res.headersSent) return;
+    limitStreamsByAuth(req, res, next);
+  });
+});
 
 // Coalescing de resoluciones en vuelo: N requests concurrentes al mismo
 // cacheKey awaitan la misma promesa en vez de disparar N scrapeos paralelos
@@ -119,8 +202,8 @@ function createAnimePerfLogger(anilistId, episode) {
   const start = Date.now();
   let last = start;
   return {
+    t0: start,
     lap(label, extra = null) {
-      if (!ANIME_PERF_DEBUG) return;
       const now = Date.now();
       const suffix = extra ? ` ${JSON.stringify(extra)}` : "";
       console.log(`[anime:perf ${anilistId}/${episode}] ${label}: +${now - last}ms total=${now - start}ms${suffix}`);
@@ -173,7 +256,9 @@ function buildReanimeSubtitleFallbackTrack(track, proxyBase) {
     : ext === "vtt"
       ? "text/vtt"
       : "text/plain";
-  const proxyUrl = `${proxyBase}/fetch?url=${encodeURIComponent(track.url)}&ref=${encodeURIComponent(track.referer || "https://flixcloud.cc/")}&ct=${encodeURIComponent(ct)}`;
+  const ref = track.referer || "https://flixcloud.cc/";
+  const s = sealedQueryParam({ url: track.url, ref, ct });
+  const proxyUrl = `${proxyBase}/fetch?${s}`;
   const { sourceUrl: _sourceUrl, r2Key: _r2Key, referer: _referer, url: _url, ...rest } = track;
   return { ...rest, url: proxyUrl };
 }
@@ -320,7 +405,8 @@ function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyB
 async function buildMovieTvTracks(tmdbId, type, season, episode, proxyBase) {
   const vidrkSubs = await getVidrkSubsWithIndex(tmdbId, type, +season, +episode, null).then(r => r ?? []).catch(() => []);
   if (!vidrkSubs?.length) return [];
-  return buildTracks(vidrkSubs, proxyBase);
+  const built = await buildTracks(vidrkSubs, proxyBase);
+  return normalizeSubtitleTracks(built || []);
 }
 
 async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime) {
@@ -329,14 +415,18 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   ]);
   const ASS_LABELS = { "en-US": "English", "es-419": "Español latino", "es-ES": "Español" };
 
-  // Tracks de CR ya vienen descargados/archivados por getCRSubsForAnime (a
-  // R2 o a disco local) — resolver la url final directo, sin pasar por
-  // buildTracks/downloadSubtitles (ese pipeline re-descargaría cualquier
-  // url con .file ausente, pisando la url de R2 con una copia local).
+  // Tracks de CR:
+  //   - Si t.file existe → CR ya lo descargó y lo persistió en disco/R2.
+  //   - Si t.url existe y !t.file → hotpath raw firmado de Crunchy. Ya fue
+  //     probado desde otras IPs, así que lo servimos directo y dejamos R2 en BG.
+  const crToUrl = (t) => {
+    if (t.file) return buildSubtitleDeliveryUrl(proxyBase, t.file, !!t.r2);
+    return t.url;
+  };
   const vttTracks = (crTracks || []).filter(t => t.format === "vtt").map(t => ({
     label: t.lang === "en-US" ? "English CC" : normalizeSubLabel(t.label, t.lang),
     lang: t.lang,
-    url: buildSubtitleDeliveryUrl(proxyBase, t.file, t.r2),
+    url: crToUrl(t),
     kind: "captions",
     ...(t.default && { default: true }),
   }));
@@ -344,7 +434,7 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   const assTracks = (crTracks || []).filter(t => t.format === "ass" && WANTED_ASS_LANGS.has(t.lang)).map(t => ({
     label: ASS_LABELS[t.lang] || t.label || t.lang,
     lang: t.lang,
-    url: buildSubtitleDeliveryUrl(proxyBase, t.file, t.r2),
+    url: crToUrl(t),
     kind: "subtitles",
     ...(t.default && { default: true }),
   }));
@@ -394,7 +484,7 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   }
 
   const rawTracks = [...vttTracks, ...assTracks, ...processedMegaplay, ...manualTracks, ...processedReanime];
-  return rawTracks;
+  return normalizeSubtitleTracks(rawTracks);
 }
 
 // ── Movie endpoint ────────────────────────────────────────────────────────────
@@ -404,8 +494,13 @@ router.get("/movie/:tmdbId", async (req, res) => {
     const cacheKey = `streams:movie:${tmdbId}`;
     const proxyBase = getProxyBase(req);
     const respKey = `resp:${cacheKey}:${proxyBase}`;
-    const cachedBody = cacheGet(respKey);
-    if (cachedBody) return res.type("application/json").send(cachedBody);
+    setSensitiveResponseHeaders(res);
+
+    if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
+      const cachedBody = cacheGet(respKey);
+      if (cachedBody) return res.type("application/json").send(cachedBody);
+    }
+
     let data = cacheGet(cacheKey);
 
     if (!data) {
@@ -445,12 +540,20 @@ router.get("/movie/:tmdbId", async (req, res) => {
     if (vidstuck?.url) streams.push(makeGenericStream(vidstuck, proxyBase, mapMovieTvLang("en", originalLang)));
     for (const vs of vidy?.streams ?? []) streams.push(makeGenericStream(vs, proxyBase, mapMovieTvLang(vs.lang, originalLang)));
     if (vixsrc?.masterUrl) streams.push(makeVixsrcStream(vixsrc, proxyBase, mapMovieTvLang("en", originalLang)));
-    const sorted = sortStreams(streams);
+    const normalized = normalizeProxyStreamTypes(streams);
+    const filtered = filterBrokenProviderLangCombos(normalized, { context: `movie/${tmdbId}` });
+    const sorted = sortStreams(filtered);
     const withDisplay = assignDisplayProviders(sorted);
-    const response = { streams: withDisplay, tracks, meta: tmdbMeta ? { title: tmdbMeta.title, year: tmdbMeta.year, originalLang } : null };
-    const body = JSON.stringify(sealProxyUrls(response, proxyBase));
-    cacheSet(respKey, body, RESP_TTL);
-    res.type("application/json").send(body);
+    const sealed = sealProxyUrls({ streams: withDisplay, tracks, meta: tmdbMeta ? { title: tmdbMeta.title, year: tmdbMeta.year, originalLang } : null }, proxyBase);
+
+    if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
+      const body = JSON.stringify(sealed);
+      cacheSet(respKey, body, RESP_TTL);
+      return res.type("application/json").send(body);
+    }
+
+    const envelope = encryptJsonEnvelope(sealed);
+    res.type("application/json").send(JSON.stringify(envelope));
   } catch (err) { handleError(res, err); }
 });
 
@@ -461,8 +564,13 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
     const cacheKey = `streams:tv:${tmdbId}:${season}:${episode}`;
     const proxyBase = getProxyBase(req);
     const respKey = `resp:${cacheKey}:${proxyBase}`;
-    const cachedBody = cacheGet(respKey);
-    if (cachedBody) return res.type("application/json").send(cachedBody);
+    setSensitiveResponseHeaders(res);
+
+    if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
+      const cachedBody = cacheGet(respKey);
+      if (cachedBody) return res.type("application/json").send(cachedBody);
+    }
+
     let data = cacheGet(cacheKey);
 
     if (!data) {
@@ -504,22 +612,39 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
     for (const vs of vidy?.streams ?? []) streams.push(makeGenericStream(vs, proxyBase, mapMovieTvLang(vs.lang, originalLang)));
     if (vixsrc?.masterUrl) streams.push(makeVixsrcStream(vixsrc, proxyBase, mapMovieTvLang("en", originalLang)));
 
-    const sorted = sortStreams(streams);
+    const normalized = normalizeProxyStreamTypes(streams);
+    const filtered = filterBrokenProviderLangCombos(normalized, { context: `tv/${tmdbId}/${season}/${episode}` });
+    const sorted = sortStreams(filtered);
     const withDisplay = assignDisplayProviders(sorted);
-    const response = { streams: withDisplay, tracks, skip: skip || null, meta: tmdbMeta ? { title: tmdbMeta.title, year: tmdbMeta.year, originalLang } : null };
-    const body = JSON.stringify(sealProxyUrls(response, proxyBase));
-    cacheSet(respKey, body, RESP_TTL);
-    res.type("application/json").send(body);
+    const sealed = sealProxyUrls({ streams: withDisplay, tracks, skip: skip || null, meta: tmdbMeta ? { title: tmdbMeta.title, year: tmdbMeta.year, originalLang } : null }, proxyBase);
+
+    if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
+      const body = JSON.stringify(sealed);
+      cacheSet(respKey, body, RESP_TTL);
+      return res.type("application/json").send(body);
+    }
+
+    const envelope = encryptJsonEnvelope(sealed);
+    res.type("application/json").send(JSON.stringify(envelope));
   } catch (err) { handleError(res, err); }
 });
 
 // ── Anime endpoint ─────────────────────────────────────────────────────────────
-async function resolveAnimeData(anilistId, episode, skipProviders = new Set()) {
+async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), opts = {}) {
   const t0 = Date.now();
   const lap = (label) => console.log(`  [resolveAnime ${anilistId}/${episode}] ${label}: ${Date.now() - t0}ms`);
   // #region debug-point B:resolve-start
   reportAnimeRouteDebug("B", "src/routes/streams.js:resolveAnimeData:start", "[DEBUG] resolveAnimeData start", { anilistId, episode, skipProviders: [...skipProviders] });
   // #endregion
+
+  const { cacheKey = null, globalStartTs = 0, globalBudgetMs = 0 } = opts;
+  let budgetMs = opts.budgetMs ?? 3_000;
+  if (globalStartTs && globalBudgetMs) {
+    const elapsed = Date.now() - globalStartTs;
+    const remain = globalBudgetMs - elapsed;
+    budgetMs = Math.max(500, remain);
+    console.log(`  [resolveAnime] global budget: total=${globalBudgetMs}ms elapsed=${elapsed}ms → effective resolve budget=${budgetMs}ms`);
+  }
 
   const timed2 = (name, promise) => {
     const ts = Date.now();
@@ -529,33 +654,22 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set()) {
     );
   };
 
-  // Los scrapers de hardsub hacen muchas requests externas (búsqueda, detalle,
-  // servers, extractores con PoW). Sin un techo, un provider lento/colgado
-  // retrasa la respuesta entera del endpoint.
-  const HARDSUB_TIMEOUT = 90_000;
-  const withScraperTimeout = (name, promise) => Promise.race([
+  const HARDSUB_TIMEOUT = 6_000;
+  const SCRAPER_TIMEOUT_FAST = 1_800;   // megaplay/megavid/cuevana/cr-subs/aniskip
+  const SCRAPER_TIMEOUT_MED = 8_000;    // animeav1 (búsqueda + servers)
+  const withTimeout = (name, ms, promise) => Promise.race([
     promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout ${HARDSUB_TIMEOUT}ms`)), HARDSUB_TIMEOUT)),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout ${ms}ms`)), ms)),
   ]);
 
-  // Prewarm del verify: apenas cada provider resuelve, disparamos la
-  // verificación de sus URLs upstream en background (queda cacheada bajo
-  // verify:{url}). Así el filterPlayableStreams del final es casi todo
-  // cache-hit en vez de empezar recién cuando el provider más lento termina.
-  // reanime/flixcloud NO se prewarma: su URL cruda está cifrada, solo se
-  // puede verificar a través del proxy local.
-  const pw = (s) => { try { prewarmVerify(s); } catch { /* nunca romper el flujo */ } };
+  const vk = (u) => `vk:${crypto.createHash("sha1").update(String(u)).digest("hex").slice(0,24)}`;
+  const pw = (s) => { try { if (!s?.url) return; prewarmVerify({ ...s, verifyKey: vk(s.url) }); } catch { /* nunca romper el flujo */ } };
 
-  // Providers salteados porque zenkai ya cubre sus langs: devuelven el
-  // empty shape que espera el build de abajo, sin scrapear.
   const skip = (name) => skipProviders.has(name);
 
-  const [latinoResult, megaplayResult, megavidResult, cuevanaResult, crSubsResult, miruroResult, anikotoResult, aniskipResult, aniwavesResult, animeheavenResult] = await Promise.allSettled([
-    skip("animeav1") ? Promise.resolve(null) : timed2("animeav1", getLatinoStream(anilistId, episode).then(v => {
+  const providerDefs = [
+    ["animeav1",    () => skip("animeav1") ? Promise.resolve(null) : timed2("animeav1", withTimeout("animeav1", SCRAPER_TIMEOUT_MED, getLatinoStream(anilistId, episode).then(v => {
       for (const s of v?.streams ?? []) {
-        // MP4Upload: mp4 directo — su CDN exige Referer del embed. Verificar
-        // sin headers da 403 y cachea false bajo verify:{url}, excluyendo el
-        // stream antes de que filterPlayableStreams pruebe proxy_url.
         const isMp4u = s.provider === "mp4upload";
         pw({
           url: s.cfUrl ?? s.url,
@@ -565,104 +679,171 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set()) {
         });
       }
       return v;
-    })),
-    skip("megaplay") ? Promise.resolve({ dub: null, sub: null }) : timed2("megaplay", getMegaplayStreams(anilistId, parseInt(episode)).then(v => {
+    })))],
+    ["megaplay",    () => skip("megaplay") ? Promise.resolve({ dub: null, sub: null }) : timed2("megaplay", withTimeout("megaplay", SCRAPER_TIMEOUT_FAST, getMegaplayStreams(anilistId, parseInt(episode)).then(v => {
       for (const it of [v?.dub, v?.sub]) if (it?.url) pw({ url: it.url, headers: it.headers, type: "hls", originalProvider: "megaplay" });
       return v;
-    })),
-    skip("megavid") ? Promise.resolve(null) : timed2("megavid", (isProviderEnabled("megavid") ? getMegavidStream(anilistId, parseInt(episode)).then(v => {
+    })))],
+    ["megavid",     () => skip("megavid") ? Promise.resolve(null) : timed2("megavid", withTimeout("megavid", SCRAPER_TIMEOUT_FAST, (isProviderEnabled("megavid") ? getMegavidStream(anilistId, parseInt(episode)).then(v => {
       if (v?.url) pw({ url: v.url, headers: { Referer: "https://megavid.buzz/" }, type: "hls", originalProvider: "megavid" });
       return v;
-    }) : Promise.resolve(null))),
-    skip("cuevana") ? Promise.resolve([]) : timed2("cuevana", getCuevanaAnime(anilistId, parseInt(episode)).then(v => {
+    }) : Promise.resolve(null))))],
+    ["cuevana",     () => skip("cuevana") ? Promise.resolve([]) : timed2("cuevana", withTimeout("cuevana", SCRAPER_TIMEOUT_FAST, getCuevanaAnime(anilistId, parseInt(episode)).then(v => {
       for (const c of v ?? []) if (c?.url) pw({ url: c.url, headers: c.headers, type: c.url.includes(".mp4") ? "mp4" : "hls", originalProvider: "embed69" });
       return v;
-    })),
-    timed2("cr-subs", getCRSubsForAnime(anilistId, parseInt(episode))),
-    skip("miruro") ? Promise.resolve({ dub: [], sub: [] }) : timed2("miruro", (isProviderEnabled("miruro") ? getMiruroStreams(anilistId, parseInt(episode)) : Promise.resolve({ dub: [], sub: [] })).then(v => {
+    })))],
+    // NUNCA meter cr-subs con timeout 1800ms como provider FAST (pedido user 2026-10-07):
+    //  - buildAnimeTracks YA llama getCRSubsForAnime independientemente (L414).
+    //  - crInflight Map DUPLICABA dedup incierto y cortaba con 1800ms arbitrario.
+    //  - Se ejecuta 1 SOLA VEZ: resolveCRSubs L803 dentro de buildAnimeTracks.
+    ["miruro",      () => skip("miruro") ? Promise.resolve({ dub: [], sub: [] }) : timed2("miruro", withTimeout("miruro", SCRAPER_TIMEOUT_MED, (isProviderEnabled("miruro") ? getMiruroStreams(anilistId, parseInt(episode)) : Promise.resolve({ dub: [], sub: [] })).then(v => {
       for (const s of [...(v?.dub ?? []), ...(v?.sub ?? [])]) if (s?.url) pw({ url: s.url, headers: s.headers, type: "hls", originalProvider: `miruro-${s.provider}` });
       return v;
-    })),
-    skip("anikoto") ? Promise.resolve({ sub: [], dub: [], hsub: [] }) : timed2("anikoto", (isProviderEnabled("anikoto") ? getAnikotoStreams(anilistId, parseInt(episode)) : Promise.resolve({ sub: [], dub: [], hsub: [] })).then(v => {
+    })))],
+    ["anikoto",     () => skip("anikoto") ? Promise.resolve({ sub: [], dub: [], hsub: [] }) : timed2("anikoto", withTimeout("anikoto", SCRAPER_TIMEOUT_FAST, (isProviderEnabled("anikoto") ? getAnikotoStreams(anilistId, parseInt(episode)) : Promise.resolve({ sub: [], dub: [], hsub: [] })).then(v => {
       for (const s of [...(v?.sub ?? []), ...(v?.dub ?? []), ...(v?.hsub ?? [])]) {
         if (s?.url && (s.type === "hls" || s.url.includes(".m3u8"))) pw({ url: s.url, headers: { Referer: s.referer }, type: "hls", originalProvider: `anikoto-${s.server}` });
       }
       return v;
-    })),
-    timed2("aniskip", anilistToMal(anilistId).then(malId => getAnimeSkip(malId, parseInt(episode)))),
-    // aniwaves: hardsub EN. NO se prewarmea: sus playlists m3u8 pueden venir
-    // ofuscados en decimal ASCII y el verify directo fallaría con "no es un
-    // m3u8 válido" — se verifica a través del proxy local en
-    // filterPlayableStreams (usa proxy_url).
-    skip("aniwaves") ? Promise.resolve({ sub: [] }) : timed2("aniwaves", (isProviderEnabled("aniwaves") ? withScraperTimeout("aniwaves", getAniwavesStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] }))),
-    // animeheaven: hardsub EN, mp4 directo — rápido (~1s), sin extractores.
-    skip("animeheaven") ? Promise.resolve({ sub: [] }) : timed2("animeheaven", (isProviderEnabled("animeheaven") ? withScraperTimeout("animeheaven", getAnimeheavenStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] }))),
+    })))],
+    ["aniskip",     () => timed2("aniskip", withTimeout("aniskip", SCRAPER_TIMEOUT_FAST, anilistToMal(anilistId).then(malId => getAnimeSkip(malId, parseInt(episode)))))],
+    ["aniwaves",    () => skip("aniwaves") ? Promise.resolve({ sub: [] }) : timed2("aniwaves", (isProviderEnabled("aniwaves") ? withTimeout("aniwaves", HARDSUB_TIMEOUT, getAniwavesStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] })))],
+    ["animeheaven", () => skip("animeheaven") ? Promise.resolve({ sub: [] }) : timed2("animeheaven", (isProviderEnabled("animeheaven") ? withTimeout("animeheaven", HARDSUB_TIMEOUT, getAnimeheavenStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] })))],
+  ];
+
+  // ── Hybrid budget: RACE providers all-settled × budgetMs ──────────────
+  // Si todos terminan antes de budgetMs = data FULL. Si budgetMs vence,
+  // liberamos la response con lo que ya llegó y los providers lentos
+  // (aniwaves, animeheaven, mp4upload slow) siguen en background
+  // actualizando el cacheSet para el próximo hit.
+  const settled = new Map(); // name → {status, value?, reason?}
+  const pendingNames = new Set();
+  const wrapped = providerDefs.map(([name, fn]) => {
+    pendingNames.add(name);
+    const p = Promise.resolve().then(fn);
+    return p.then(
+      value => { const rec = { status: "fulfilled", value }; settled.set(name, rec); pendingNames.delete(name); return { name, ...rec }; },
+      reason => { const rec = { status: "rejected", reason }; settled.set(name, rec); pendingNames.delete(name); return { name, ...rec }; }
+    );
+  });
+  const allSettledPromise = Promise.all(wrapped);
+  const budgetPromise = new Promise(res => setTimeout(() => res({ tag: "hot" }), budgetMs));
+  const race = await Promise.race([
+    allSettledPromise.then(arr => ({ tag: "full", arr })),
+    budgetPromise,
   ]);
-  lap("allSettled done");
 
-  // Resumen consolidado: qué devolvió cada provider (o por qué falló).
-  // Sin esto, un provider caído solo se nota por ausencia de streams.
+  let mode;
+  if (race.tag === "full") {
+    mode = "FULL";
+    lap("allSettled done");
+  } else {
+    mode = `HOT-only (budget ${budgetMs}ms, pending=[${[...pendingNames].join(",")}] seguirán en bg)`;
+    lap(`allSettled hybrid HOT (pending=[${[...pendingNames].join(",")}]) budget=${budgetMs}ms`);
+    // ── Background update: cuando allSettled termine, cacheSet full para prox hit
+    if (cacheKey) {
+      (async () => {
+        try { await allSettledPromise; } catch { /* ignore */ }
+        const fullData = buildResolveResult(settled, anilistId, episode, skipProviders);
+        const hasAny = fullData.megaplayDub || fullData.megaplaySub || fullData.megavid || fullData.latino || fullData.cuevanaStreams?.length || fullData.anikoto?.sub?.length || fullData.anikoto?.dub?.length || fullData.anikoto?.hsub?.length || fullData.aniwaves?.sub?.length || fullData.animeheaven?.sub?.length;
+        if (hasAny) {
+          const t0c = Date.now();
+          cacheSet(cacheKey, fullData, STREAM_TTL);
+          console.log(`[cache:perf] streams BG cacheSet FULL (${cacheKey}): +${Date.now()-t0c}ms — (aniwaves/animeheaven finalizados)`);
+        }
+      })();
+    } else {
+      // No hay cacheKey: igual esperamos un rato más en bg para no perder
+      // logs, pero no cacheamos.
+      allSettledPromise.catch(() => {});
+    }
+  }
+
+  const data = buildResolveResult(settled, anilistId, episode, skipProviders, mode);
+  return data;
+}
+
+function buildResolveResult(settled, anilistId, episode, skipProviders, mode = "") {
+  const t0 = Date.now();
+  const lap = (label) => console.log(`  [resolveAnime ${anilistId}/${episode}] ${label}: ${Date.now() - t0}ms`);
+
+  const read = (name, fallback) => {
+    const r = settled.get(name);
+    if (!r) return fallback;
+    if (r.status === "fulfilled") return r.value ?? fallback;
+    return fallback;
+  };
+  const reasonOf = (name) => settled.get(name)?.status === "rejected" ? settled.get(name).reason : null;
+
+  // Resumen consolidado
   const providerSummary = [
-    ["animeav1",   latinoResult,    v => `${v?.streams?.length ?? 0} streams`],
-    ["megaplay",   megaplayResult,  v => `dub=${!!v?.dub} sub=${!!v?.sub}`],
-    ["megavid",    megavidResult,   v => (v?.url ? "ok" : "null")],
-    ["cuevana",    cuevanaResult,   v => `${v?.length ?? 0} streams`],
-    ["cr-subs",    crSubsResult,    v => `${v?.length ?? 0} tracks`],
-    ["miruro",     miruroResult,    v => `dub=${v?.dub?.length ?? 0} sub=${v?.sub?.length ?? 0}`],
-    ["anikoto",    anikotoResult,   v => `sub=${v?.sub?.length ?? 0} dub=${v?.dub?.length ?? 0}`],
-    ["aniwaves",   aniwavesResult,  v => `sub=${v?.sub?.length ?? 0}`],
-    ["animeheaven", animeheavenResult, v => `sub=${v?.sub?.length ?? 0}`],
-    ["aniskip",    aniskipResult,   v => (v ? "ok" : "null")],
-  ].map(([name, r, fmt]) =>
-    skipProviders.has(name) ? `${name}⊘zenkai` :
-    r.status === "fulfilled" ? `${name}✓(${fmt(r.value)})` : `${name}✗(${r.reason?.message ?? "?"})`
-  ).join(" ");
-  console.log(`  [resolveAnime] providers: ${providerSummary}`);
-  // #region debug-point B:resolve-summary
-  reportAnimeRouteDebug("B", "src/routes/streams.js:resolveAnimeData:done", "[DEBUG] resolveAnimeData done", { anilistId, episode, ms: Date.now() - t0, providerSummary });
-  // #endregion
+    ["animeav1",   read("animeav1", null),    v => `${v?.streams?.length ?? 0} streams`],
+    ["megaplay",   read("megaplay", { dub: null, sub: null }),  v => `dub=${!!v?.dub} sub=${!!v?.sub}`],
+    ["megavid",    read("megavid", null),   v => (v?.url ? "ok" : "null")],
+    ["cuevana",    read("cuevana", []),   v => `${v?.length ?? 0} streams`],
+    ["cr-subs",    read("cr-subs", []),    v => `${v?.length ?? 0} tracks`],
+    ["miruro",     read("miruro", { dub: [], sub: [] }),    v => `dub=${v?.dub?.length ?? 0} sub=${v?.sub?.length ?? 0}`],
+    ["anikoto",    read("anikoto", { sub: [], dub: [], hsub: [] }),   v => `sub=${v?.sub?.length ?? 0} dub=${v?.dub?.length ?? 0}`],
+    ["aniwaves",   read("aniwaves", { sub: [] }),  v => `sub=${v?.sub?.length ?? 0}`],
+    ["animeheaven", read("animeheaven", { sub: [] }), v => `sub=${v?.sub?.length ?? 0}`],
+    ["aniskip",    read("aniskip", null),   v => (v ? "ok" : "null")],
+  ].map(([name, value, fmt]) => {
+    if (skipProviders.has(name)) return `${name}⊘zenkai`;
+    const reason = reasonOf(name);
+    if (reason) return `${name}✗(${reason.message ?? "?"})`;
+    return `${name}✓(${fmt(value)})`;
+  }).join(" ");
+  console.log(`  [resolveAnime] providers: ${providerSummary}` + (mode ? ` [mode=${mode}]` : ""));
+  lap("summary+unpack start");
+  reportAnimeRouteDebug("B", "src/routes/streams.js:resolveAnimeData:done", "[DEBUG] resolveAnimeData done", { anilistId, episode, ms: Date.now() - t0, providerSummary, mode });
 
-  const aniskip = aniskipResult.status === "fulfilled" ? aniskipResult.value : null;
-  if (aniskipResult.status === "rejected") console.warn("[anime] aniskip ✗:", aniskipResult.reason?.message);
+  const aniskipVal = read("aniskip", null);
+  if (reasonOf("aniskip")) console.warn("[anime] aniskip ✗:", reasonOf("aniskip")?.message);
 
-  const latino = latinoResult.status === "fulfilled" ? latinoResult.value : null;
+  const latino = read("animeav1", null);
   const hasDubLatino = latino?.streams.some(s => s.type === "dub") ?? false;
-  const cuevanaStreams = cuevanaResult.status === "fulfilled" ? cuevanaResult.value : [];
-  if (cuevanaResult.status === "rejected") console.warn(`[anime] embed69 ✗:`, cuevanaResult.reason?.message);
+  const cuevanaStreams = read("cuevana", []);
+  if (reasonOf("cuevana")) console.warn(`[anime] embed69 ✗:`, reasonOf("cuevana")?.message);
 
-  const crTracks = crSubsResult.status === "fulfilled" && crSubsResult.value?.length ? crSubsResult.value : null;
-  if (crSubsResult.status === "rejected") console.warn("[anime] cr-subs ✗:", crSubsResult.reason?.message);
+  const crTracks = read("cr-subs", []);
+  const crTracksOut = (crTracks && crTracks.length) ? crTracks : null;
+  if (reasonOf("cr-subs")) console.warn("[anime] cr-subs ✗:", reasonOf("cr-subs")?.message);
 
-  const megaplayBoth = megaplayResult.status === "fulfilled" ? megaplayResult.value : { dub: null, sub: null };
-  const miruro = miruroResult.status === "fulfilled" ? miruroResult.value : { dub: null, sub: null };
-  if (miruroResult.status === "rejected") console.warn("[anime] miruro ✗:", miruroResult.reason?.message);
-  const anikoto = anikotoResult.status === "fulfilled" ? anikotoResult.value : { sub: [], dub: [] };
-  if (anikotoResult.status === "rejected") console.warn("[anime] anikoto ✗:", anikotoResult.reason?.message);
-  const megavid = megavidResult.status === "fulfilled" ? megavidResult.value : null;
-  if (megavidResult.status === "rejected") console.warn("[anime] megavid ✗:", megavidResult.reason?.message);
-  const aniwaves = aniwavesResult.status === "fulfilled" ? aniwavesResult.value : { sub: [] };
-  if (aniwavesResult.status === "rejected") console.warn("[anime] aniwaves ✗:", aniwavesResult.reason?.message);
-  const animeheaven = animeheavenResult.status === "fulfilled" ? animeheavenResult.value : { sub: [] };
-  if (animeheavenResult.status === "rejected") console.warn("[anime] animeheaven ✗:", animeheavenResult.reason?.message);
+  const megaplayBoth = read("megaplay", { dub: null, sub: null });
+  const miruro = read("miruro", { dub: null, sub: null });
+  if (reasonOf("miruro")) console.warn("[anime] miruro ✗:", reasonOf("miruro")?.message);
+  const anikoto = read("anikoto", { sub: [], dub: [] });
+  if (reasonOf("anikoto")) console.warn("[anime] anikoto ✗:", reasonOf("anikoto")?.message);
+  const megavid = read("megavid", null);
+  if (reasonOf("megavid")) console.warn("[anime] megavid ✗:", reasonOf("megavid")?.message);
+  const aniwaves = read("aniwaves", { sub: [] });
+  if (reasonOf("aniwaves")) console.warn("[anime] aniwaves ✗:", reasonOf("aniwaves")?.message);
+  const animeheaven = read("animeheaven", { sub: [] });
+  if (reasonOf("animeheaven")) console.warn("[anime] animeheaven ✗:", reasonOf("animeheaven")?.message);
 
-  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks, miruro, anikoto, aniwaves, animeheaven, aniskip };
+  lap("summary+unpack done");
+  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks: crTracksOut, miruro, anikoto, aniwaves, animeheaven, aniskip: aniskipVal };
 }
 
 async function getReanimeCached(anilistId, episode, cacheKey) {
+  const t0 = Date.now();
+  const rlap = (s) => console.log(`  [reanime:perf ${anilistId}/${episode}] ${s}: +${Date.now()-t0}ms`);
   const hit = cacheGet(cacheKey);
   if (hit) {
     // #region debug-point D:reanime-cache-hit
     reportAnimeRouteDebug("D", "src/routes/streams.js:getReanimeCached:hit", "[DEBUG] reanime cache hit", { anilistId, episode, cacheKey });
     // #endregion
+    rlap("cache hit");
     return hit;
   }
-  if (!isProviderEnabled("reanime")) return { sub: null, dub: null };
+  if (!isProviderEnabled("reanime")) { rlap("disabled"); return { sub: null, dub: null }; }
   return coalesce(cacheKey, async () => {
     const secondHit = cacheGet(cacheKey);
     if (secondHit) {
       // #region debug-point D:reanime-cache-hit-after-coalesce
       reportAnimeRouteDebug("D", "src/routes/streams.js:getReanimeCached:hit-after-coalesce", "[DEBUG] reanime cache hit after coalesce", { anilistId, episode, cacheKey });
       // #endregion
+      rlap("cache hit (after coalesce)");
       return secondHit;
     }
     try {
@@ -670,13 +851,17 @@ async function getReanimeCached(anilistId, episode, cacheKey) {
       // #region debug-point D:reanime-cache-miss
       reportAnimeRouteDebug("D", "src/routes/streams.js:getReanimeCached:miss", "[DEBUG] reanime cache miss", { anilistId, episode, cacheKey });
       // #endregion
+      rlap("getReanimeStreams start");
       const value = await getReanimeStreams(anilistId, episode);
+      rlap(`getReanimeStreams done sub=${value?.sub?.items?.length??'n'} dub=${value?.dub?.items?.length??'n'}`);
       cacheSet(cacheKey, value, REANIME_STREAM_TTL);
       // #region debug-point D:reanime-cache-store
       reportAnimeRouteDebug("D", "src/routes/streams.js:getReanimeCached:store", "[DEBUG] reanime resolved and cached", { anilistId, episode, cacheKey, ms: Date.now() - start, hasSub: Boolean(value?.sub), hasDub: Boolean(value?.dub) });
       // #endregion
+      rlap("stored ok");
       return value;
     } catch (e) {
+      rlap(`FAIL: ${e.message}`);
       console.warn("[anime] reanime ✗:", e.message);
       return { sub: null, dub: null };
     }
@@ -684,6 +869,7 @@ async function getReanimeCached(anilistId, episode, cacheKey) {
 }
 
 const R2_LANG_LABELS = {
+  "MULTI": "Multi audio",
   "ESP-LAT": "Español latino",
   "ENG-DUB": "Inglés (doblado)",
   "JAP-SUB": "Japonés (sub por separado)",
@@ -702,7 +888,8 @@ function buildZenkaiStreams(r2Archived, episodeThumbnails = {}) {
   for (const [lang, entry] of Object.entries(r2Archived)) {
     try {
       const signedUrl = buildSignedR2Url(`${entry.slug}/master.m3u8`);
-      const thumbnailKey = isDubLikeLang(lang) ? dubThumbnailKey : subThumbnailKey;
+      const isMulti = lang === "MULTI";
+      const thumbnailKey = isMulti ? (subThumbnailKey || dubThumbnailKey) : (isDubLikeLang(lang) ? dubThumbnailKey : subThumbnailKey);
       const thumbnailUrl = thumbnailKey ? buildPublicR2Url(thumbnailKey) : null;
       // Mismo formato `skip` que usan los demás providers (ver makeAnimeStream):
       // { intro: [start,end], outro: [start,end] } en segundos.
@@ -718,6 +905,9 @@ function buildZenkaiStreams(r2Archived, episodeThumbnails = {}) {
         provider: "zenkai",
         originalProvider: "zenkai",
         sourceProvider: entry.sourceProvider,
+        ...(isMulti && { multiAudio: true }),
+        ...(isMulti && Array.isArray(entry.audioTracks) && entry.audioTracks.length && { audioTracks: entry.audioTracks }),
+        ...(isMulti && Array.isArray(entry.subtitleTracks) && entry.subtitleTracks.length && { subtitleTracks: entry.subtitleTracks }),
         proxy_url: signedUrl,
         verifyKey: `r2:${entry.slug}`,
         ...(skip && { skip }),
@@ -755,21 +945,29 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       const cacheKey = `streams:anime:v15:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v11:${anilistId}:${episode}`;
   const respKey = `resp:${cacheKey}:${proxyBase}`;
-  const cachedBody = cacheGet(respKey);
-  if (cachedBody) return res.type("application/json").send(cachedBody);
+  perf.lap("route start (headers set)");
+  setSensitiveResponseHeaders(res);
+  perf.lap("headers set");
 
-  // Zenkai (R2 archive) por lang: los streams archivados que pasan verify
-  // cubren su lang — los providers que solo sirven langs cubiertos no se
-  // scrapean. JAP-SUB nunca se archiva → sus providers corren siempre.
-  // Si un zenkai falla verify, su lang queda descubierto y vuelve a scrapear.
+  if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
+    const cachedBody = cacheGet(respKey);
+    if (cachedBody) { perf.lap("resp cache hit, sending"); return res.type("application/json").send(cachedBody); }
+    perf.lap("resp cache miss");
+  }
+
+  perf.lap("before r2 archive + thumbs");
   const r2Archived = getR2Archive(anilistId, episode);
   let episodeThumbnails = getEpisodeThumbnails(anilistId, episode);
+  perf.lap("r2Archived + episodeThumbnails from cache", { archivedLangs: Object.keys(r2Archived).length, hasThumbs: Boolean(episodeThumbnails) });
   const coveredLangs = new Set();
   if (Object.keys(r2Archived).length) {
     const zenkaiStreams = buildZenkaiStreams(r2Archived, episodeThumbnails);
+    perf.lap("buildZenkaiStreams done", { count: zenkaiStreams.length, r2Keys: Object.keys(r2Archived) });
+    console.log(`[anime:zenkai] r2 keys raw=${JSON.stringify(Object.keys(r2Archived))} | built langs=${zenkaiStreams.map(s=>s.lang).join(",")}`);
     if (zenkaiStreams.length) {
       const ok = await filterPlayableStreams(zenkaiStreams, { allowEmpty: true });
       for (const s of ok) coveredLangs.add(s.lang);
+      console.log(`[anime:zenkai] AFTER verify coveredLangs=${[...coveredLangs].join(",")} | dropped=${zenkaiStreams.length-ok.length} (stream(s) R2 con signature muerta? verify KO)`);
     } else {
       console.warn(`[anime] zenkai ${anilistId}/${episode}: archivado pero sin URLs firmadas (falta R2_SEAL_SECRET/R2_WORKER_BASE)`);
     }
@@ -777,16 +975,21 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   perf.lap("r2 coverage ready", { archivedLangs: Object.keys(r2Archived).length, coveredLangs: coveredLangs.size });
   const skipProviders = new Set(
     Object.entries(PROVIDER_LANGS)
+      // EXCEPCIONES HARD user (2026-10-07): animeav1 NUNCA se skippea, incluso si
+      // Zenkai cubre sus idiomas. User lo requiere "sí o sí". Los demás siguen la regla.
+      .filter(([name]) => name !== "animeav1")
       .filter(([, langs]) => langs.every((l) => coveredLangs.has(l)))
       .map(([name]) => name)
   );
   if (skipProviders.size) {
     console.log(`[anime] zenkai cubre ${[...coveredLangs].join(",")} — skip: ${[...skipProviders].join(",")}`);
   }
+  perf.lap("skipProviders computed", { skipSize: skipProviders.size });
 
+  perf.lap("before cacheGet providers");
   let data = cacheGet(cacheKey);
   let reanimeData = skipProviders.has("reanime") ? null : cacheGet(reanimeCacheKey);
-  // #region debug-point A:cache-snapshot
+  perf.lap("after cacheGet providers", { dataCacheHit: Boolean(data), reanimeCacheHit: Boolean(reanimeData) });
   reportAnimeRouteDebug("A", "src/routes/streams.js:anime-route:cache-snapshot", "[DEBUG] anime route cache snapshot", {
     anilistId,
     episode,
@@ -797,25 +1000,27 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     reanimeCacheHit: Boolean(reanimeData),
     skipProviders: [...skipProviders],
   });
-  // #endregion
   if (data) console.log(`[anime] ${anilistId}/${episode} servido desde cache (providers no corrieron)`);
   if (reanimeData) console.log(`[anime] ${anilistId}/${episode} reanime servido desde cache`);
 
   if (!data) {
+    perf.lap("data cache miss: will coalesce resolveAnime");
     const dataPromise = coalesce(cacheKey, async () => {
       const hit = cacheGet(cacheKey);
       if (hit) return hit;
-      const d = await resolveAnimeData(anilistId, episode, skipProviders);
+      const d = await resolveAnimeData(anilistId, episode, skipProviders, { cacheKey, globalStartTs: perf.t0, globalBudgetMs: 5000 });
       const hasAny = d.megaplayDub || d.megaplaySub || d.megavid || d.latino || d.cuevanaStreams?.length || d.anikoto?.sub?.length || d.anikoto?.dub?.length || d.anikoto?.hsub?.length || d.aniwaves?.sub?.length || d.animeheaven?.sub?.length;
-      // Scrape parcial (providers salteados por zenkai) NO se persiste: si
-      // un zenkai muere, el próximo build lo detecta por verify y re-scrapea
-      // los providers de ese lang en vez de servir data incompleta cacheada.
-      if (hasAny && !skipProviders.size) cacheSet(cacheKey, d, STREAM_TTL);
+      if (hasAny && !skipProviders.size) {
+        const t0 = Date.now();
+        cacheSet(cacheKey, d, STREAM_TTL);
+        console.log(`[cache:perf] streams cacheSet (${cacheKey}): +${Date.now() - t0}ms — JSON approx ${Math.round(JSON.stringify(d).length/1024)}KB`);
+      }
       return d;
     });
     const reanimePromise = (!reanimeData && !skipProviders.has("reanime"))
       ? getReanimeCached(anilistId, episode, reanimeCacheKey)
       : Promise.resolve(reanimeData);
+    perf.lap("about to await Promise.all dataPromise+reanimePromise");
     [data, reanimeData] = await Promise.all([dataPromise, reanimePromise]);
     perf.lap("resolveAnimeData done", { fromCache: false });
     if (!skipProviders.has("reanime")) perf.lap("getReanimeCached done", { fromCache: Boolean(reanimeData) });
@@ -828,23 +1033,33 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     perf.lap("provider caches ready", { dataCache: Boolean(data), reanimeCache: Boolean(reanimeData) });
   }
 
+  perf.lap("before data.reanime + thumb sync");
   data.reanime = reanimeData;
   if (reanimeData) {
     syncReanimeThumbnailMetadata(anilistId, episode, reanimeData);
     episodeThumbnails = getEpisodeThumbnails(anilistId, episode);
   }
-  const body = await coalesce(respKey, async () => {
-    const cachedResp = cacheGet(respKey);
-    if (cachedResp) return cachedResp;
+  perf.lap("after data.reanime + thumb sync");
+  perf.lap("about to coalesce respKey");
+  const bodyOrSealed = await coalesce(respKey, async () => {
+    perf.lap("resp coalesce body start");
+    if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
+      const cachedResp = cacheGet(respKey);
+      if (cachedResp) { perf.lap("resp coalesce inner cache hit"); return { kind: "cached", body: cachedResp }; }
+      perf.lap("resp coalesce inner cache miss");
+    }
 
     const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniwaves, animeheaven, aniskip, reanime } = data;
+    perf.lap("about to start buildAnimeTracks (in parallel with stream build)");
     const tracksPromise = buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
     if (reanimeData) cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
     if (reanimeData) enqueueReanimeSidecarArchive({ anilistId, episode, reanime: reanimeData, reanimeCacheKey, respKey });
+    perf.lap("after enqueue reanime sidecar");
 
     let streams = [];
 
     streams.push(...buildZenkaiStreams(r2Archived, episodeThumbnails));
+    perf.lap("buildZenkaiStreams push done", { count: streams.length });
 
     const downloads = [];
 
@@ -857,9 +1072,16 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       const introRange = item.intro ? [item.intro.start, item.intro.end] : (item.introStart != null ? [item.introStart, item.introEnd] : null);
       const outroRange = item.outro ? [item.outro.start, item.outro.end] : (item.outroStart != null ? [item.outroStart, item.outroEnd] : null);
       const skip = (introRange || outroRange) ? { ...(introRange && { intro: introRange }), ...(outroRange && { outro: outroRange }) } : null;
-      const s = makeAnimeStream(proxyBase, item.url, "auto", lang, originalProvider, { skip });
-      s.proxy_url = `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(item.url)}&audio=${audioTrack}${item.manifest_key ? `&k=${encodeURIComponent(item.manifest_key)}` : ""}`;
-      if (item.downloadLink) downloads.push({ lang: s.lang, langLabel: s.langLabel, server: `reanime-${item.server}`, url: item.downloadLink });
+      const s = makeAnimeStream(proxyBase, maskRawUrl(item.url), "auto", lang, originalProvider, { skip });
+      const flixPayload = { u: item.url, audio: audioTrack };
+      if (item.manifest_key) flixPayload.k = item.manifest_key;
+      s.proxy_url = `${proxyBase}/river.m3u8?${sealedQueryParam(flixPayload)}`;
+      if (item.downloadLink) {
+        const rawDl = typeof item.downloadLink === "string" && item.downloadLink.startsWith("sealed:")
+          ? (unmaskRawUrl(item.downloadLink) || item.downloadLink)
+          : item.downloadLink;
+        downloads.push({ lang: s.lang, langLabel: s.langLabel, server: publicDownloadServer(originalProvider), url: `${proxyBase}/dl?x=${sealQueryPayload({ url: rawDl, hint: originalProvider })}` });
+      }
       if (item.available_fonts && Object.keys(item.available_fonts).length) {
         s.available_fonts = item.available_fonts;
       }
@@ -873,8 +1095,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
         s.thumbnailVtt = r2ThumbnailVtt;
         s.thumbnailVttProxy = r2ThumbnailVtt;
       } else if (item.thumbnails_vtt) {
-        s.thumbnailVtt = item.thumbnails_vtt;
-        s.thumbnailVttProxy = `${proxyBase}/fetch?url=${encodeURIComponent(item.thumbnails_vtt)}&ref=${encodeURIComponent("https://flixcloud.cc/")}&ct=${encodeURIComponent("text/vtt")}`;
+        s.thumbnailVtt = maskRawUrl(item.thumbnails_vtt);
+        s.thumbnailVttProxy = `${proxyBase}/fetch?${sealedQueryParamDeterministic({ url: item.thumbnails_vtt, ref: "https://flixcloud.cc/", ct: "text/vtt" })}`;
       }
       streams.push(s);
     }
@@ -905,7 +1127,14 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     for (const [list, type] of [[latino?.downloads?.dub ?? [], "dub"], [latino?.downloads?.sub ?? [], "sub"]]) {
       if (!list.length) continue;
       const { lang, langLabel } = normalizeLang(type === "dub" ? "es-lat" : "japanese", "animeav1");
-      for (const { server, url } of list) downloads.push({ lang, langLabel, server, url });
+      for (const { server, url } of list) {
+        if (!url || typeof url !== "string") continue;
+        let rawUrl = url;
+        if (rawUrl.startsWith("sealed:")) rawUrl = unmaskRawUrl(rawUrl) || url;
+        if (!/^https?:\/\//i.test(rawUrl)) continue;
+        const dlProviderLabel = publicDownloadServer("animeav1");
+        downloads.push({ lang, langLabel, server: dlProviderLabel, url: `${proxyBase}/dl?x=${sealQueryPayload({ url: rawUrl, hint: `animeav1:${server || "s1"}` })}` });
+      }
     }
 
     if (latino) {
@@ -925,12 +1154,12 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
           s.proxy_url = `${proxyBase}/upn-stream.m3u8?u=${encodeURIComponent(url)}`;
         }
         if (thumbnailVtt) {
-          s.thumbnailVtt = thumbnailVtt;
-          s.thumbnailVttProxy = `${proxyBase}/fetch?url=${encodeURIComponent(thumbnailVtt)}&ref=${encodeURIComponent(new URL(thumbnailVtt).origin + "/")}&ct=${encodeURIComponent("text/vtt")}`;
+          s.thumbnailVtt = maskRawUrl(thumbnailVtt);
+          s.thumbnailVttProxy = `${proxyBase}/fetch?${sealedQueryParamDeterministic({ url: thumbnailVtt, ref: new URL(thumbnailVtt).origin + "/", ct: "text/vtt" })}`;
         }
         if (thumbnailJpg) {
-          s.thumbnailJpg = thumbnailJpg;
-          s.thumbnailJpgProxy = `${proxyBase}/fetch?url=${encodeURIComponent(thumbnailJpg)}&ref=${encodeURIComponent(new URL(thumbnailJpg).origin + "/")}&ct=${encodeURIComponent("image/jpeg")}`;
+          s.thumbnailJpg = maskRawUrl(thumbnailJpg);
+          s.thumbnailJpgProxy = `${proxyBase}/fetch?${sealedQueryParamDeterministic({ url: thumbnailJpg, ref: new URL(thumbnailJpg).origin + "/", ct: "image/jpeg" })}`;
         }
         streams.push(s);
       }
@@ -947,7 +1176,12 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
         if (miruroStream.download) {
           const { lang: dlLang, langLabel: dlLangLabel } = normalizeLang(lang, originalProvider);
-          downloads.push({ lang: dlLang, langLabel: dlLangLabel, server: miruroStream.provider, url: miruroStream.download });
+          let dlUrl = String(miruroStream.download);
+          if (dlUrl.startsWith("sealed:")) dlUrl = unmaskRawUrl(dlUrl) || dlUrl;
+          const sealedDl = /^https?:\/\//i.test(dlUrl)
+            ? `${proxyBase}/dl?x=${sealQueryPayload({ url: dlUrl, hint: originalProvider })}`
+            : dlUrl;
+          downloads.push({ lang: dlLang, langLabel: dlLangLabel, server: publicDownloadServer(originalProvider), url: sealedDl });
         }
 
         if (MIRURO_HIDDEN_PROVIDERS.has(miruroStream.provider)) continue;
@@ -979,6 +1213,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     }
 
     for (const c of (cuevanaStreams ?? [])) streams.push(makeCuevanaStream(c, proxyBase));
+    perf.lap("after all stream builder loops (megaplay/reanime/latino/megavid/cuevana/miruro/anikoto/aniwaves/animeheaven)", { count: streams.length });
 
     for (const [list, lang, prefix] of [
       [anikoto?.dub ?? [], "en-dub", "anikoto"],
@@ -1028,7 +1263,9 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       else if (!s.skip && aniskip) s.skip = aniskip;
     }
 
-    const sorted = sortStreams(streams);
+    const normalized = normalizeProxyStreamTypes(streams);
+    const cleaned = filterBrokenProviderLangCombos(normalized, { context: `anime/${anilistId}/${episode}` });
+    const sorted = sortStreams(cleaned);
     const grouped = [...sorted.filter(s => isDubLang(s.lang)), ...sorted.filter(s => !isDubLang(s.lang))];
     const playable = await filterPlayableStreams(grouped);
     perf.lap("filterPlayableStreams done", { inCount: grouped.length, outCount: playable.length });
@@ -1036,13 +1273,26 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     perf.lap("assignDisplayProviders done", { count: withDisplay.length });
     const tracks = await tracksPromise;
     perf.lap("buildAnimeTracks done", { trackCount: tracks?.length ?? 0 });
-    const builtBody = JSON.stringify(sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks, downloads }, proxyBase));
-    perf.lap("seal+stringify done", { bytes: builtBody.length, downloads: downloads.length });
-    cacheSet(respKey, builtBody, RESP_TTL);
-    perf.lap("resp cache stored");
-    return builtBody;
+    const sealed = sealProxyUrls({ anilistId, episode: parseInt(episode), streams: withDisplay, tracks, downloads }, proxyBase);
+
+    if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
+      const builtBody = JSON.stringify(sealed);
+      perf.lap("seal+stringify done", { bytes: builtBody.length, downloads: downloads.length });
+      cacheSet(respKey, builtBody, RESP_TTL);
+      perf.lap("resp cache stored");
+      return { kind: "built", body: builtBody };
+    }
+
+    perf.lap("seal done (no cache, encrypt mode)", { downloads: downloads.length });
+    return { kind: "sealed", sealed };
   });
-  res.type("application/json").send(body);
+
+  if (bodyOrSealed.kind === "cached" || bodyOrSealed.kind === "built") {
+    res.type("application/json").send(bodyOrSealed.body);
+  } else {
+    const envelope = encryptJsonEnvelope(bodyOrSealed.sealed);
+    res.type("application/json").send(JSON.stringify(envelope));
+  }
   perf.lap("response sent");
 });
 

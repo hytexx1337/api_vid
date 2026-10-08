@@ -39,6 +39,8 @@ async function verifySig(secret, path, exp, sig) {
 __name(verifySig, "verifySig");
 function contentTypeFor(filename) {
   if (filename.startsWith("seg-")) return "video/mp2t";
+  if (/^video_\d+\./.test(filename)) return "video/mp2t";
+  if (/^a\d+_\d+\./.test(filename)) return "video/mp2t";
   if (filename.startsWith("aud-")) return "video/mp2t";
   if (filename.startsWith("audf-")) return "video/mp4";
   if (filename.startsWith("init-")) return "video/mp4";

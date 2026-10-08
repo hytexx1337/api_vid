@@ -316,7 +316,11 @@ async function runDecryptWasm(wasmBytes, fragment, keyFragment, token, seed) {
 }
 
 export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase = "https://flixcloud.cc", headers = {}, referer } = {}) {
+  const t0 = Date.now();
+  const fl = (s) => console.log(`    [flixcloud:extract] ${s}: +${Date.now()-t0}ms`);
+  fl("start");
   const data = parseJsLiteral(extractSsrObj(embedHtml));
+  fl(`SSR parsed (subs=${data.subtitles?.length??0}, fonts=${Object.keys(data.available_fonts??{}).length}, vtt=${Boolean(data.thumbnails_vtt)})`);
   const seed = data.obfuscation_seed;
   if (!seed) {
     const error = new Error("obfuscation_seed missing");
@@ -324,6 +328,7 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
     throw error;
   }
   const fields = await deriveFields(seed);
+  fl(`deriveFields done (seed=${seed.slice(0,10)}...)`);
   const cryptoData = data.obfuscated_crypto_data;
   if (!cryptoData) {
     const error = new Error("obfuscated_crypto_data missing");
@@ -363,13 +368,18 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
     error.debug = { fields, topKeys: Object.keys(data).slice(0, 20) };
     throw error;
   }
+  fl(`crypto fields unpacked token=${token.slice(0,12)}... about to fetch /api/m3u8/:token`);
+  const ttok = Date.now();
   const tokenResponse = await fetchImpl(`${apiBase}/api/m3u8/${token}`, { headers: { ...headers, ...(referer ? { Referer: referer } : {}) } });
+  fl(`fetch /api/m3u8/:token: +${Date.now()-ttok}ms status=${tokenResponse.status}`);
   if (!tokenResponse.ok) {
     const error = new Error(`Token API ${tokenResponse.status}`);
     error.rawBody = await tokenResponse.text().catch(() => null);
     throw error;
   }
+  const ttokjson = Date.now();
   const tokenData = await tokenResponse.json();
+  fl(`tokenData json parsed: +${Date.now()-ttokjson}ms`);
   const videoKey = (await sha256hex(token + "vid")).substring(0, 10);
   const tokenKey = (await sha256hex(token + "key")).substring(0, 10);
   const videoBytes = b64toU8(tokenData[videoKey]);
@@ -385,15 +395,19 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
   let wasmOut;
   let manifestKey = null;
   let wasmDebug = null;
+  const tw = Date.now();
   try {
     const res = await runDecryptWasm(wasmPayload, fragment, keyFragment, tokenBytes, seedNumber);
     wasmOut = res.out;
     manifestKey = res.manifestKey;
     wasmDebug = res.debug ?? null;
+    fl(`runDecryptWasm: +${Date.now()-tw}ms (manifestKey=${Boolean(manifestKey)})`);
   } catch (error) {
     wasmDebug = `wasm-error: ${error.message}`;
     wasmOut = runDecrypt(wasmPayload, fragment, keyFragment, tokenBytes, seedNumber);
+    fl(`runDecrypt fallback (no WASM): +${Date.now()-tw}ms`);
   }
+  const tcrypto = Date.now();
   const material = await crypto.subtle.importKey("raw", wasmOut, { name: "PBKDF2" }, false, ["deriveBits"]);
   const derived = new Uint8Array(await crypto.subtle.deriveBits({ name: "PBKDF2", salt: encoder.encode(seed), iterations: 1e3, hash: "SHA-256" }, material, 256));
   for (let i = 0; i < 32; i++) derived[i] ^= seed.charCodeAt(i % seed.length);
@@ -415,8 +429,10 @@ export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase =
     };
     throw error;
   }
+  fl(`PBKDF2+AES decrypt: +${Date.now()-tcrypto}ms`);
   const url = decoder.decode(plain).trim().replace(/\0+$/, "");
   if (!url.startsWith("http")) throw new Error(`Unexpected decrypted value: ${url.substring(0, 60)}`);
+  fl(`DONE url=${url.slice(0,60)}... TOTAL=+${Date.now()-t0}ms`);
   return {
     url,
     subtitles: data.subtitles ?? [],

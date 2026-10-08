@@ -4,7 +4,7 @@ import { createGunzip, createInflate, createBrotliDecompress, gunzipSync } from 
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
 import path from "path";
-import { sealProxyUrlsInText, unsealProxyPath } from "../lib/proxy-seal.js";
+import { sealProxyUrlsInText, unsealProxyPath, tryUnsealQueryPayload, sealedQueryParam, sealedQueryParamDeterministic } from "../lib/proxy-seal.js";
 import { buildPublicR2Url } from "../lib/r2-seal.js";
 import { HEADERS, MIRURO_API, CC_MEDIA, CC_PLAYLIST, CC_SUBS } from "../config/constants.js";
 import { getProxyBase, setCacheForResponse, rewriteM3U8, parsHeaders } from "../lib/proxy.js";
@@ -126,17 +126,18 @@ router.get("/upn-seg", async (req, res) => {
 // clave fija global de 32 bytes (reverseada el 2026-09-06, ver
 // lib/flixcloud-decrypt.js). Los segmentos (.webp/.png) tienen SU PROPIO
 // cifrado (header falso + XOR de 16 bytes, ver decryptFlixcloudSegment) y
-// pasan por /flixcloud-seg, no por el /ts-proxy genérico.
+// pasan por /river-seg, no por el /ts-proxy genérico.
 const FLIXCLOUD_REFERER = "https://flixcloud.cc/";
 
 function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang, manifestKey) {
-  const keyParam = manifestKey ? `&k=${encodeURIComponent(manifestKey)}` : "";
   const rewriteAbsolute = (absolute) => {
     if (absolute.includes(".m3u8")) {
-      const audioParam = onlyAudioLang ? `&audio=${encodeURIComponent(onlyAudioLang)}` : "";
-      return `${proxyBase}/flixcloud-m3u8?u=${encodeURIComponent(absolute)}${audioParam}${keyParam}`;
+      const payload = { u: absolute };
+      if (onlyAudioLang) payload.audio = onlyAudioLang;
+      if (manifestKey) payload.k = manifestKey;
+      return `${proxyBase}/river.m3u8?${sealedQueryParam(payload)}`;
     }
-    return `${proxyBase}/flixcloud-seg?u=${encodeURIComponent(absolute)}`;
+    return `${proxyBase}/river-seg?${sealedQueryParam({ u: absolute })}`;
   };
   const lines = text.split("\n");
   const out = [];
@@ -144,11 +145,6 @@ function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang, manif
     const trimmed = line.trim();
     if (!trimmed) { out.push(line); continue; }
     if (trimmed.startsWith("#")) {
-      // El master trae AMBAS pistas de audio (jpn Native + eng English) en el
-      // mismo EXT-X-STREAM-INF. Si onlyAudioLang viene seteado (?audio=jpn|eng
-      // desde el proxy_url que armamos por audio en streams.js), tiramos la
-      // línea EXT-X-MEDIA de la pista que NO se pidió, para que el player no
-      // tenga de dónde elegir la otra.
       if (onlyAudioLang && /^#EXT-X-MEDIA:TYPE=AUDIO/.test(trimmed)) {
         const langMatch = trimmed.match(/LANGUAGE="([^"]+)"/);
         if (langMatch && langMatch[1] !== onlyAudioLang) continue;
@@ -171,11 +167,12 @@ function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang, manif
   return out.join("\n");
 }
 
-router.get("/flixcloud-m3u8", async (req, res) => {
-  const target = req.query.u;
-  const onlyAudioLang = req.query.audio || null;
-  const manifestKey = req.query.k || null;
-  if (!target) return res.status(400).json({ error: "Missing u param" });
+async function handleRiverManifest(req, res) {
+  const sealed = tryUnsealQueryPayload(req.query.s);
+  const target = (sealed?.u) || req.query.u;
+  const onlyAudioLang = sealed?.audio ?? req.query.audio ?? null;
+  const manifestKey = sealed?.k ?? req.query.k ?? null;
+  if (!target) return res.status(400).json({ error: "Missing target" });
   try {
     const plainText = await fetchAndDecryptFlixcloudManifest(target, FLIXCLOUD_REFERER, manifestKey);
     const proxyBase = getProxyBase(req);
@@ -184,23 +181,16 @@ router.get("/flixcloud-m3u8", async (req, res) => {
     setCacheForResponse(res, "application/vnd.apple.mpegurl", ".m3u8");
     res.send(rewritten);
   } catch (e) {
-    console.warn(`[flixcloud-m3u8] ERROR: ${e.message}`);
-    // La URL del stream que decripta extractFlixcloud() queda cacheada en
-    // streams:anime:v5:* con STREAM_TTL (7 días), pero el token de flixcloud
-    // que esa URL codifica vence mucho antes (probablemente minutos/horas).
-    // Sin esto, una vez vencido el token, TODOS los pedidos de ese episodio
-    // devuelven 403 durante hasta 7 días — invalidamos la entrada cacheada
-    // para forzar un re-resolve (nuevo embed + nuevo token) en el próximo GET.
+    console.warn(`[river.m3u8] ERROR: ${e.message}`);
     if (e.status === 403 || e.status === 404) invalidateStreamsContainingUrl(target);
     res.status(e.status || 500).json({ error: e.message });
   }
-});
+}
 
-// Segmentos (.webp/.png disfrazados, ver decryptFlixcloudSegment): fetch +
-// strip del header falso + XOR de 16 bytes cuando corresponde → MPEG-TS real.
-router.get("/flixcloud-seg", async (req, res) => {
-  const target = req.query.u;
-  if (!target) return res.status(400).json({ error: "Missing u param" });
+async function handleRiverSegment(req, res) {
+  const sealed = tryUnsealQueryPayload(req.query.s);
+  const target = (sealed?.u) || req.query.u;
+  if (!target) return res.status(400).json({ error: "Missing target" });
   try {
     const upstream = await fetch(target, {
       headers: { "User-Agent": HEADERS["User-Agent"], Referer: FLIXCLOUD_REFERER, Origin: "https://flixcloud.cc" },
@@ -216,9 +206,70 @@ router.get("/flixcloud-seg", async (req, res) => {
     setCacheForResponse(res, "video/mp2t", target);
     res.send(decrypted);
   } catch (e) {
-    console.warn(`[flixcloud-seg] ERROR: ${e.message}`);
+    console.warn(`[river-seg] ERROR: ${e.message}`);
     res.status(e.status || 500).json({ error: e.message });
   }
+}
+
+// Nombre público (canónico):
+router.get("/river.m3u8", handleRiverManifest);
+router.get("/river-seg", handleRiverSegment);
+// Alias legacy (no romper URLs que quedaron cacheadas en respuestas antiguas):
+router.get("/flixcloud-m3u8", handleRiverManifest);
+router.get("/flixcloud-seg", handleRiverSegment);
+
+// ── Shortlink /dl: redirect 302 a URL de descarga sellada ──────────────────
+// Evita que el cliente exponga "sealed:..." ni la URL cruda flixcloud en el body.
+// /dl?x=<sealedQueryPayload({ url })> → 302 Location: <url real>
+// /dl/info?x=<same> → JSON { url, contentType, hint } (sin redirect, solo metadata)
+const dlLimiter = createRateLimiter({ windowMs: 60_000, max: 60, message: "Too many dl requests" });
+
+function unsealDlParam(queryX) {
+  if (!queryX) return null;
+  try {
+    const s = String(queryX);
+    const r = tryUnsealQueryPayload(s);
+    if (!r || !r.url || typeof r.url !== "string") return null;
+    if (!/^https?:\/\//i.test(r.url)) return null;
+    return { url: r.url, hint: r.hint || null };
+  } catch { return null; }
+}
+
+router.get("/dl/info", dlLimiter, (req, res) => {
+  const u = unsealDlParam(req.query.x);
+  if (!u) return res.status(400).json({ error: "invalid or missing sealed download url" });
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  try {
+    const parsed = new URL(u.url);
+    return res.json({
+      url: u.url,
+      hostname: parsed.hostname,
+      pathname: parsed.pathname,
+      hint: u.hint || null,
+    });
+  } catch {
+    return res.json({ url: u.url, hint: u.hint });
+  }
+});
+
+router.get("/dl", dlLimiter, (req, res) => {
+  const u = unsealDlParam(req.query.x);
+  if (!u) return res.status(400).send("Invalid download link");
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  // Pequeña protección anti-leak: Referrer-Policy: no-referrer evita que el
+  // server destino vea de qué página vino el link (podría leakear nuestra
+  // URL /dl con el token sellado en el Referer si se sigue desde el cliente).
+  res.setHeader("Referrer-Policy", "no-referrer");
+  try {
+    // Validar URL antes de redirect
+    new URL(u.url);
+  } catch {
+    return res.status(400).send("Invalid download destination");
+  }
+  return res.redirect(302, u.url);
 });
 
 // ── Generic HLS proxy ────────────────────────────────────────────────────────
@@ -705,7 +756,10 @@ router.get("/ts-proxy", async (req, res) => {
 });
 
 router.get("/fetch", async (req, res) => {
-  const { url, ref, ct } = req.query;
+  const sealed = tryUnsealQueryPayload(req.query.s);
+  const url = (sealed?.url) || req.query.url;
+  const ref = (sealed?.ref) || req.query.ref;
+  const ctRaw = (sealed?.ct) || req.query.ct;
   if (!url) return res.status(400).json({ error: "url is required" });
   try {
     const { statusCode, headers: upHeaders, body } = await proxyFetch(url, {
@@ -718,7 +772,7 @@ router.get("/fetch", async (req, res) => {
       else if (body && typeof body.destroy === "function") body.destroy();
       return res.status(statusCode).json({ error: `Upstream error: ${statusCode}` });
     }
-    const contentType = ct ? decodeURIComponent(ct) : (upHeaders["content-type"] ?? "application/octet-stream");
+    const contentType = ctRaw ? decodeURIComponent(ctRaw) : (upHeaders["content-type"] ?? "application/octet-stream");
     res.setHeader("Content-Type", contentType);
     const chunks = [];
     for await (const chunk of body) chunks.push(chunk);
@@ -735,17 +789,20 @@ router.get("/fetch", async (req, res) => {
       });
     }
     let text;
-    if (buf.includes(Buffer.from("hoofoot.ru"))) {
+    const decodedUrl = url; // req.query ya viene decodificado por Express
+    const hasSpam = buf.includes(Buffer.from("hoofoot.ru"));
+    const isVtt = contentType.includes("vtt") || decodedUrl.endsWith(".vtt");
+    if (hasSpam || isVtt) {
       text = buf.toString("utf-8");
-      const lines = text.split("\n");
-      const spamLines = lines.filter((l) => l.includes("hoofoot.ru"));
-      if (spamLines.length) {
-        console.log(`[fetch-filter] eliminando ${spamLines.length} línea(s) con hoofoot.ru (${url.slice(0, 80)})`);
-        text = lines.filter((l) => !l.includes("hoofoot.ru")).join("\n");
+      if (hasSpam) {
+        const lines = text.split("\n");
+        const spamLines = lines.filter((l) => l.includes("hoofoot.ru"));
+        if (spamLines.length) {
+          console.log(`[fetch-filter] eliminando ${spamLines.length} línea(s) con hoofoot.ru (${url.slice(0, 80)})`);
+          text = lines.filter((l) => !l.includes("hoofoot.ru")).join("\n");
+        }
       }
     }
-    const decodedUrl = url; // req.query ya viene decodificado por Express
-    const isVtt = contentType.includes("vtt") || decodedUrl.endsWith(".vtt");
     if (isVtt && text !== undefined) {
       // Base para resolver rutas relativas de sprites. Si la URL del VTT no
       // tiene extensión (flixcloud: /thumbnails_vtt/{uuid}), el UUID actúa
@@ -755,15 +812,30 @@ router.get("/fetch", async (req, res) => {
       const basePath = lastSeg.includes(".")
         ? decodedUrl.substring(0, decodedUrl.lastIndexOf("/") + 1)
         : decodedUrl.replace(/\/$/, "") + "/";
-      // Reescribir a /fetch proxied (no URL absoluta directa): hosts como
-      // fetch8.flixcloud.cc exigen Referer y devuelven 403/404 sin él.
+      // Reescribir a /fetch sellado: hosts como fetch8.flixcloud.cc exigen
+      // Referer y devuelven 403/404 sin él, además no queremos leakear la
+      // URL cruda en el body del VTT.
       const proxyBase = getProxyBase(req);
-      const refParam = ref ? `&ref=${encodeURIComponent(ref)}` : "";
-      text = text.replace(/^([\w./-]+\.(?:webp|jpg|jpeg|png)(#[^\s]*)?)$/gim, (m, rel, frag) => {
+      const refDefault = ref || "https://flixcloud.cc/";
+      // NOTA: el pattern de la línea entera incluye hash y fragmento
+      // (#xywh=0,0,160,90). Los paths a veces tienen ./../thumbnails/... o
+      // bien thumbnails/sprite_X.webp con cualquier cosa después del #.
+      // Capturamos TODO menos whitespace y caracteres rotos de URL.
+      text = text.replace(/^([\w./\\-][^\s"'<>|]*\.(?:webp|jpg|jpeg|png)(?:#[^\s]*)?)$/gim, (match, rel) => {
         try {
-          const abs = new URL(rel, basePath).href;
-          return `${proxyBase}/fetch?url=${encodeURIComponent(abs)}${refParam}&ct=${encodeURIComponent("image/webp")}`;
-        } catch { return m; }
+          // rel viene con #fragmento tipo #xywh=0,0,160,90.
+          //  - El #xywh es 100% cliente-side (nunca se envía al servidor).
+          //  - Para TOKEN DETERMINÍSTICO: sellamos solo la URL SIN hash.
+          //  - Para RENDER VTT correcto: el #xywh se PRESERVA como
+          //    fragmento DEL LINK DEL PROXY (fuera del s= token).
+          const hashIdx = rel.indexOf("#");
+          const pre = hashIdx === -1 ? rel : rel.slice(0, hashIdx);
+          const frag = hashIdx === -1 ? "" : rel.slice(hashIdx);
+          const ext = pre.split(".").pop().toLowerCase();
+          const imgCt = (ext === "jpg" || ext === "jpeg") ? "image/jpeg" : ext === "png" ? "image/png" : "image/webp";
+          const absNoHash = new URL(pre, basePath).href;
+          return `${proxyBase}/fetch?${sealedQueryParamDeterministic({ url: absNoHash, ref: refDefault, ct: imgCt })}${frag}`;
+        } catch { return match; }
       });
     }
     if (text !== undefined) {

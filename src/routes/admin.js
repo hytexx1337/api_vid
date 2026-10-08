@@ -3,8 +3,10 @@ import path from "path";
 import { existsSync } from "fs";
 import { readVdrkIndex, writeVdrkIndex, readCrIndex, writeCrIndex } from "../lib/subtitles.js";
 import {
-  listPersistedKeys, cacheDelete,
+  listPersistedKeys, cacheDelete, cacheFlushAll,
+  cacheDeleteAnimeResponseCache,
   listAllR2Archive, upsertR2Archive, deleteR2Archive,
+  upsertEpisodeThumbnail,
   listAllManualTracks, addManualTrack, deleteManualTrack,
 } from "../lib/cache.js";
 import { verifyAnimeCache } from "../lib/stream-verifier.js";
@@ -29,6 +31,10 @@ router.get("/admin/api/stream-cache", (req, res) => {
 router.delete("/admin/api/stream-cache/:key", (req, res) => {
   cacheDelete(decodeURIComponent(req.params.key));
   res.json({ ok: true });
+});
+
+router.delete("/admin/api/stream-cache", requireApiKey, (req, res) => {
+  res.json({ ok: true, ...cacheFlushAll() });
 });
 
 router.post("/admin/api/verify-anime-cache", async (req, res) => {
@@ -96,7 +102,24 @@ router.delete("/admin/api/cr-index/:key", (req, res) => {
 // episodio aparezca servido en /anime/:id/:episode.
 
 // Langs válidos = los grupos que streams.js sabe servir desde r2_archive.
-const VALID_ARCHIVE_LANGS = new Set(["ESP-LAT", "ENG-DUB", "JAP-ES-HS", "JAP-EN-HS"]);
+const VALID_ARCHIVE_LANGS = new Set(["ESP-LAT", "ENG-DUB", "JAP-ES-HS", "JAP-EN-HS", "MULTI"]);
+
+function normalizeArchiveTracks({ tracks, audioTracks, subtitleTracks }) {
+  const src = tracks && typeof tracks === "object" ? tracks : { audioTracks, subtitleTracks };
+  const normalized = {
+    audioTracks: Array.isArray(src.audioTracks) ? src.audioTracks : [],
+    subtitleTracks: Array.isArray(src.subtitleTracks) ? src.subtitleTracks : [],
+  };
+  if (!normalized.audioTracks.length && !normalized.subtitleTracks.length) return null;
+  for (const [name, list] of Object.entries(normalized)) {
+    for (const item of list) {
+      if (!item || typeof item !== "object" || Array.isArray(item)) {
+        throw new Error(`${name} inválido: cada track debe ser un objeto`);
+      }
+    }
+  }
+  return normalized;
+}
 
 // Listado completo: lo que ya está archivado + tracks manuales, para que el
 // panel pueda mostrar todo y avisar antes de sobreescribir.
@@ -107,6 +130,8 @@ router.get("/admin/api/r2-archive", requireApiKey, (req, res) => {
 // Registra un episodio ya subido a R2 por el panel.
 // Body: { animeId, episode, lang, slug, bytes?, sourceProvider?,
 //         skipIntro?: [start,end], skipOutro?: [start,end],
+//         thumbnailVttKey?: "thumbs/...",
+//         audioTracks?: [...], subtitleTracks?: [...]
 //         subs?: [{ file, label, lang, kind? }] }
 // skipIntro/skipOutro son rangos en segundos (opcionales) que el player usa
 // para el botón "saltar intro/outro" — mismo formato que el campo `skip`
@@ -115,7 +140,7 @@ router.get("/admin/api/r2-archive", requireApiKey, (req, res) => {
 // acá para que nadie registre un path arbitrario del bucket.
 router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, res) => {
   try {
-    const { animeId, episode, lang, slug, bytes, sourceProvider, subs, skipIntro, skipOutro } = req.body || {};
+    const { animeId, episode, lang, slug, bytes, sourceProvider, subs, skipIntro, skipOutro, thumbnailVttKey, tracks, audioTracks, subtitleTracks } = req.body || {};
     if (!animeId || !episode || !lang || !slug) {
       return res.status(400).json({ error: "Faltan campos: animeId, episode, lang, slug" });
     }
@@ -132,6 +157,12 @@ router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, 
         return res.status(400).json({ error: `${name} inválido: se esperaba [start, end] en segundos` });
       }
     }
+    let archiveTracks = null;
+    try {
+      archiveTracks = normalizeArchiveTracks({ tracks, audioTracks, subtitleTracks });
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
 
     upsertR2Archive({
       animeId, episode, lang, slug,
@@ -139,7 +170,19 @@ router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, 
       bytes: bytes ?? null,
       skipIntro: skipIntro ?? null,
       skipOutro: skipOutro ?? null,
+      tracks: archiveTracks,
     });
+    const responseCacheCleared = cacheDeleteAnimeResponseCache(animeId, episode);
+
+    if (thumbnailVttKey) {
+      upsertEpisodeThumbnail({
+        animeId,
+        episode,
+        variant: lang === "ENG-DUB" ? "dub" : "sub",
+        vttKey: String(thumbnailVttKey),
+        sourceProvider: sourceProvider || "manual",
+      });
+    }
 
     const subsRegistered = [];
     for (const s of Array.isArray(subs) ? subs : []) {
@@ -151,8 +194,15 @@ router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, 
       }
     }
 
-    console.log(`[admin] register-archive ${animeId} ep${episode} ${lang} → ${slug} (${subsRegistered.length} subs)`);
-    res.json({ ok: true, slug, subsRegistered });
+    console.log(`[admin] register-archive ${animeId} ep${episode} ${lang} → ${slug} (${subsRegistered.length} subs, ${archiveTracks?.audioTracks?.length ?? 0} audios, ${archiveTracks?.subtitleTracks?.length ?? 0} subtitle tracks)`);
+    res.json({
+      ok: true,
+      slug,
+      subsRegistered,
+      audioTracksRegistered: archiveTracks?.audioTracks?.length ?? 0,
+      subtitleTracksRegistered: archiveTracks?.subtitleTracks?.length ?? 0,
+      responseCacheCleared,
+    });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

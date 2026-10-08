@@ -38,14 +38,15 @@ async function upnShareToM3U8(embedUrl, attempt = 0) {
           "User-Agent": PAGE_HEADERS["User-Agent"],
           "Referer": `${UPN_BASE}/#${token}`,
         },
-        signal: AbortSignal.timeout(8000),
+        signal: AbortSignal.timeout(2000),
       }
     );
   } catch (e) {
-    // Timeout/red intermitente contra animeav1.uns.bio — un reintento antes
-    // de rendirse evita perder el stream por un solo hiccup transitorio.
+    // Si fue timeout o abort: no reintentar, host colgado → skip.
+    if (e?.name === "TimeoutError" || e?.name === "AbortError") return null;
+    // Red/transitoria: 1 retry.
     if (attempt === 0) return upnShareToM3U8(embedUrl, 1);
-    throw e;
+    return null;
   }
   if (!r.ok) {
     if (attempt === 0) return upnShareToM3U8(embedUrl, 1);
@@ -58,7 +59,7 @@ async function upnShareToM3U8(embedUrl, attempt = 0) {
     data = upnDecrypt(hex);
   } catch (e) {
     if (attempt === 0) return upnShareToM3U8(embedUrl, 1);
-    throw e;
+    return null;
   }
 
   // El dominio del CDN en data.cf (fusionpeaknetworks.site, horizenbuild.online,
@@ -740,15 +741,17 @@ async function scrapeM3U8(slug, episode) {
     // #region debug-point A:scrape-cache-hit
     reportAnimeAv1Debug("A", "src/providers/scraper.js:scrapeM3U8:hit", "[DEBUG] animeav1 stream cache hit", { cacheKey, slug, episode, streamCount: cached?.streams?.length ?? 0 });
     // #endregion
+    console.log(`  [scraper:perf] ${slug}/${episode} cache hit ✅`);
     return cached;
   }
   // #region debug-point A:scrape-cache-miss
   reportAnimeAv1Debug("A", "src/providers/scraper.js:scrapeM3U8:miss", "[DEBUG] animeav1 stream cache miss", { cacheKey, slug, episode });
   // #endregion
+  const t0 = Date.now();
+  const lap = (l) => console.log(`  [scraper:perf] ${slug}/${episode} ${l}: +${Date.now() - t0}ms`);
 
   const epNum = parseInt(episode);
 
-  // Para películas animeav1 usa /0 o /1 sin criterio fijo → probar ambos
   const candidates = [epNum];
   if (epNum === 0) candidates.push(1);
   if (epNum === 1) candidates.push(0);
@@ -760,10 +763,12 @@ async function scrapeM3U8(slug, episode) {
     if (res.ok) { usedEp = ep; break; }
     console.warn(`[scraper] 404 en ${slug}/${ep}, probando siguiente...`);
   }
+  lap(`page-fetch status=${res.status}`);
 
   if (!res.ok) throw Object.assign(new Error(`Page fetch failed: ${res.status}`), { status: 502 });
 
   const html = await res.text();
+  lap(`html-download size=${html.length}B`);
 
   const dubUrls    = extractAllHlsUrls(html, "DUB");
   const subUrls    = extractAllHlsUrls(html, "SUB");
@@ -774,6 +779,7 @@ async function scrapeM3U8(slug, episode) {
   const dubMp4uUrls = extractMp4UploadUrls(html, "DUB");
   const subMp4uUrls = extractMp4UploadUrls(html, "SUB");
   const downloads  = extractDownloadLinks(html);
+  lap(`extract-urls dub(HLS=${dubUrls.length} UPN=${dubUpnUrls.length} Voe=${dubVoeUrls.length} MP4U=${dubMp4uUrls.length}) sub(HLS=${subUrls.length} UPN=${subUpnUrls.length} Voe=${subVoeUrls.length} MP4U=${subMp4uUrls.length})`);
 
   console.log(`[scraper] slug=${slug} ep=${usedEp} | DUB HLS=${dubUrls.length} UPN=${dubUpnUrls.length} Voe=${dubVoeUrls.length} MP4U=${dubMp4uUrls.length} | SUB HLS=${subUrls.length} UPN=${subUpnUrls.length} Voe=${subVoeUrls.length} MP4U=${subMp4uUrls.length}`);
 
@@ -781,39 +787,26 @@ async function scrapeM3U8(slug, episode) {
     throw new Error("No player URLs found in page HTML");
   }
 
-  // Resolver UPNShare, Voe y MP4Upload de DUB y SUB en paralelo, SIEMPRE
-  // todos los tipos de cada servidor — un fallo transitorio en uno no debe
-  // tirar todo el resultado si otro (nunca probado antes) hubiera funcionado.
   const dubUpnPromises = dubUpnUrls.map(u => upnShareToM3U8(u).catch(() => null));
   const subUpnPromises = subUpnUrls.map(u => upnShareToM3U8(u).catch(() => null));
-  const dubVoePromises = dubVoeUrls.map(u => voeToM3U8(u).catch(() => null));
-  const subVoePromises = subVoeUrls.map(u => voeToM3U8(u).catch(() => null));
-  const dubMp4uPromises = dubMp4uUrls.map(u => mp4uploadToStream(u).catch(() => null));
-  const subMp4uPromises = subMp4uUrls.map(u => mp4uploadToStream(u).catch(() => null));
+  const dubVoeFutures = dubVoeUrls.map(u => voeToM3U8(u).catch(() => null));
+  const subVoeFutures = subVoeUrls.map(u => voeToM3U8(u).catch(() => null));
+  const dubMp4uFutures = dubMp4uUrls.map(u => mp4uploadToStream(u).catch(() => null));
+  const subMp4uFutures = subMp4uUrls.map(u => mp4uploadToStream(u).catch(() => null));
 
-  // Todos los servidores DUB HLS + primer servidor SUB HLS
   const streams = [];
   dubUrls.forEach((url, i) => streams.push({ url: playToM3U8(url), type: "dub", server: i + 1 }));
   if (subUrls.length > 0) streams.push({ url: playToM3U8(subUrls[0]), type: "sub", server: 1 });
 
-  // Agregar servidores UPNShare resueltos — el número de servidor es
-  // relativo al tipo: si ya hay 1 SUB HLS, el UPNShare SUB es srv2
   const dubHlsCount = dubUrls.length;
   const subHlsCount = subUrls.length > 0 ? 1 : 0;
-  const [dubUpnResults, subUpnResults, dubVoeResults, subVoeResults, dubMp4uResults, subMp4uResults] = await Promise.all([
-    Promise.all(dubUpnPromises),
-    Promise.all(subUpnPromises),
-    Promise.all(dubVoePromises),
-    Promise.all(subVoePromises),
-    Promise.all(dubMp4uPromises),
-    Promise.all(subMp4uPromises),
-  ]);
-  const pushUpnResults = (results, type, baseCount) => {
+
+  const pushUpnResults = (results, type, baseCount, streamsOut) => {
     results.forEach((upn, i) => {
       if (!upn?.url) return;
       const serverNum = baseCount + i + 1;
       console.log(`[scraper] UPNShare(${type}) server${serverNum}: ${upn.url}`);
-      streams.push({
+      streamsOut.push({
         url:          upn.url,
         type,
         server:       serverNum,
@@ -824,18 +817,12 @@ async function scrapeM3U8(slug, episode) {
       });
     });
   };
-  pushUpnResults(dubUpnResults, "dub", dubHlsCount);
-  pushUpnResults(subUpnResults, "sub", subHlsCount);
-
-  // Voe: server number sigue después de HLS + UPNShare de ese mismo tipo
-  const dubBeforeVoe = dubHlsCount + dubUpnResults.filter(r => r?.url).length;
-  const subBeforeVoe = subHlsCount + subUpnResults.filter(r => r?.url).length;
-  const pushVoeResults = (results, type, baseCount) => {
+  const pushVoeResults = (results, type, baseCount, streamsOut) => {
     results.forEach((voe, i) => {
       if (!voe?.url) return;
       const serverNum = baseCount + i + 1;
       console.log(`[scraper] Voe(${type}) server${serverNum}: ${voe.url}`);
-      streams.push({
+      streamsOut.push({
         url:          voe.url,
         type,
         server:       serverNum,
@@ -846,18 +833,12 @@ async function scrapeM3U8(slug, episode) {
       });
     });
   };
-  pushVoeResults(dubVoeResults, "dub", dubBeforeVoe);
-  pushVoeResults(subVoeResults, "sub", subBeforeVoe);
-
-  // MP4Upload: server number sigue después de HLS + UPNShare + Voe de ese tipo
-  const dubBeforeMp4u = dubBeforeVoe + dubVoeResults.filter(r => r?.url).length;
-  const subBeforeMp4u = subBeforeVoe + subVoeResults.filter(r => r?.url).length;
-  const pushMp4uResults = (results, type, baseCount) => {
+  const pushMp4uResults = (results, type, baseCount, streamsOut) => {
     results.forEach((mp4u, i) => {
       if (!mp4u?.url) return;
       const serverNum = baseCount + i + 1;
       console.log(`[scraper] MP4Upload(${type}) server${serverNum}: ${mp4u.url}`);
-      streams.push({
+      streamsOut.push({
         url:          mp4u.url,
         type,
         server:       serverNum,
@@ -867,19 +848,74 @@ async function scrapeM3U8(slug, episode) {
       });
     });
   };
-  pushMp4uResults(dubMp4uResults, "dub", dubBeforeMp4u);
-  pushMp4uResults(subMp4uResults, "sub", subBeforeMp4u);
+  const buildStreams = ([du, su, dv, sv, dm, sm]) => {
+    const out = [...streams];
+    pushUpnResults(du, "dub", dubHlsCount, out);
+    pushUpnResults(su, "sub", subHlsCount, out);
+    const dubBeforeVoe = dubHlsCount + du.filter(r => r?.url).length;
+    const subBeforeVoe = subHlsCount + su.filter(r => r?.url).length;
+    pushVoeResults(dv, "dub", dubBeforeVoe, out);
+    pushVoeResults(sv, "sub", subBeforeVoe, out);
+    const dubBeforeMp4u = dubBeforeVoe + dv.filter(r => r?.url).length;
+    const subBeforeMp4u = subBeforeVoe + sv.filter(r => r?.url).length;
+    pushMp4uResults(dm, "dub", dubBeforeMp4u, out);
+    pushMp4uResults(sm, "sub", subBeforeMp4u, out);
+    return out;
+  };
 
-  streams.forEach(s => console.log(`[scraper] m3u8 (${s.type} srv${s.server}): ${s.url}`));
-  // Cachear también con el ep que realmente funcionó (para películas que usan /0)
-  // TTL corto porque UPNShare firma la URL con un token (pk.kx) que expira en ~25-30 min;
-  // cachear por 4hs serviría cf-master URLs muertas (403) la mayor parte del tiempo.
+  const slowExtractorsStarted = Date.now();
+  const slowAllPromise = Promise.all([
+    Promise.all(dubUpnPromises),
+    Promise.all(subUpnPromises),
+    Promise.all(dubVoeFutures),
+    Promise.all(subVoeFutures),
+    Promise.all(dubMp4uFutures),
+    Promise.all(subMp4uFutures),
+  ]).then(arr => {
+    const [du, su, dv, sv, dm, sm] = arr;
+    console.log(`[scraper:perf] slow-extractors ALL done UPN(${du.filter(Boolean).length}/${du.length} Voe ${dv.filter(Boolean).length} MP4U ${dm.filter(Boolean).length}) +${Date.now()-slowExtractorsStarted}ms`);
+    return arr;
+  });
+
+  const SLOW_BUDGET_MS = 1500;
+  const budgetStart = Date.now();
+  const waited = await Promise.race([
+    slowAllPromise.then(arr => ({ tag: "full", arr })),
+    new Promise(r => setTimeout(() => r({ tag: "hot" }), SLOW_BUDGET_MS)),
+  ]);
+  const emptySlow = [dubUpnPromises.map(()=>null), subUpnPromises.map(()=>null), dubVoeFutures.map(()=>null), subVoeFutures.map(()=>null), dubMp4uFutures.map(()=>null), subMp4uFutures.map(()=>null)];
+  const finalStreams = waited.tag === "full"
+    ? buildStreams(waited.arr)
+    : buildStreams(emptySlow);
+  if (waited.tag === "full") {
+    lap(`resolve-extractors-hybrid FULL (slow < budget) UPN+Voe+MP4U incluídos: +${Date.now()-budgetStart}ms`);
+  } else {
+    lap(`resolve-extractors-hybrid HOT-only (slow > ${SLOW_BUDGET_MS}ms, seguirán en bg): +${Date.now()-budgetStart}ms`);
+    // Background: cuando termine slow, actualizar cache para el próximo hit.
+    // eslint-disable-next-line no-unused-expressions
+    (async () => {
+      try {
+        const arr = await slowAllPromise;
+        const fullOut = buildStreams(arr);
+        fullOut.forEach(s => console.log(`[scraper] m3u8 bg (${s.type} srv${s.server}): ${s.url}`));
+        const streamsTtl = 15 * 60 * 1000;
+        const full = { streams: fullOut, downloads };
+        cacheSet(cacheKey, full, streamsTtl);
+        if (usedEp !== epNum) cacheSet(`m3u8:${slug}:${usedEp}`, full, streamsTtl);
+        console.log(`[scraper:perf] slow-extractors CACHE UPDATED (prox hit tendrá UPN/Voe/MP4U)`);
+      } catch (e) {
+        console.warn(`[scraper:perf] slow-extractors bg update error: ${e.message}`);
+      }
+    })();
+  }
+
+  finalStreams.forEach(s => console.log(`[scraper] m3u8 (${s.type} srv${s.server}): ${s.url}`));
   const streamsTtl = 15 * 60 * 1000;
-  const result = { streams, downloads };
+  const result = { streams: finalStreams, downloads };
   cacheSet(cacheKey, result, streamsTtl);
   if (usedEp !== epNum) cacheSet(`m3u8:${slug}:${usedEp}`, result, streamsTtl);
   // #region debug-point B:scrape-result
-  reportAnimeAv1Debug("B", "src/providers/scraper.js:scrapeM3U8:done", "[DEBUG] animeav1 scrape result", { cacheKey, slug, requestedEpisode: epNum, usedEpisode: usedEp, streamCount: streams.length, downloadCount: (downloads?.sub?.length ?? 0) + (downloads?.dub?.length ?? 0) });
+  reportAnimeAv1Debug("B", "src/providers/scraper.js:scrapeM3U8:done", "[DEBUG] animeav1 scrape result", { cacheKey, slug, requestedEpisode: epNum, usedEpisode: usedEp, streamCount: finalStreams.length, downloadCount: (downloads?.sub?.length ?? 0) + (downloads?.dub?.length ?? 0) });
   // #endregion
   return result;
 }
