@@ -129,6 +129,23 @@ router.get("/upn-seg", async (req, res) => {
 // pasan por /river-seg, no por el /ts-proxy genérico.
 const FLIXCLOUD_REFERER = "https://flixcloud.cc/";
 
+function cleanFlixcloudUrl(value) {
+  return String(value || "").trim().replace(/^`+|`+$/g, "");
+}
+
+function flixcloudRequestHeaders() {
+  return {
+    "User-Agent": HEADERS["User-Agent"],
+    Accept: "*/*",
+    "Accept-Language": "es-419,es;q=0.9,en;q=0.8",
+    Referer: FLIXCLOUD_REFERER,
+    Origin: "https://flixcloud.cc",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Dest": "empty",
+  };
+}
+
 function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang, manifestKey) {
   const rewriteAbsolute = (absolute) => {
     if (absolute.includes(".m3u8")) {
@@ -169,7 +186,7 @@ function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang, manif
 
 async function handleRiverManifest(req, res) {
   const sealed = tryUnsealQueryPayload(req.query.s);
-  const target = (sealed?.u) || req.query.u;
+  const target = cleanFlixcloudUrl((sealed?.u) || req.query.u);
   const onlyAudioLang = sealed?.audio ?? req.query.audio ?? null;
   const manifestKey = sealed?.k ?? req.query.k ?? null;
   if (!target) return res.status(400).json({ error: "Missing target" });
@@ -189,11 +206,11 @@ async function handleRiverManifest(req, res) {
 
 async function handleRiverSegment(req, res) {
   const sealed = tryUnsealQueryPayload(req.query.s);
-  const target = (sealed?.u) || req.query.u;
+  const target = cleanFlixcloudUrl((sealed?.u) || req.query.u);
   if (!target) return res.status(400).json({ error: "Missing target" });
   try {
     const upstream = await fetch(target, {
-      headers: { "User-Agent": HEADERS["User-Agent"], Referer: FLIXCLOUD_REFERER, Origin: "https://flixcloud.cc" },
+      headers: flixcloudRequestHeaders(),
       signal: AbortSignal.timeout(20000),
     });
     if (!upstream.ok) {
@@ -202,8 +219,10 @@ async function handleRiverSegment(req, res) {
     }
     const raw = Buffer.from(await upstream.arrayBuffer());
     const decrypted = decryptFlixcloudSegment(raw);
-    res.setHeader("Content-Type", "video/mp2t");
-    setCacheForResponse(res, "video/mp2t", target);
+    const isKey = /\/key\.bin(?:\?|$)/i.test(new URL(target).pathname);
+    const contentType = isKey ? "application/octet-stream" : "video/mp2t";
+    res.setHeader("Content-Type", contentType);
+    setCacheForResponse(res, contentType, target);
     res.send(decrypted);
   } catch (e) {
     console.warn(`[river-seg] ERROR: ${e.message}`);
