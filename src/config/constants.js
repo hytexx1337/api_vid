@@ -1,4 +1,4 @@
-export const PORT = process.env.PORT || 8000;
+export const PORT = process.env.PORT || 1337;
 
 export const ALLOWED_ORIGINS_EXACT = new Set([
   "https://cineparatodos.lat",
@@ -8,8 +8,10 @@ export const ALLOWED_ORIGINS_EXACT = new Set([
   "https://metacatalog.tech",
   "https://cdn.cineparatodos.lat",
   "http://localhost:3000",
+  "http://localhost:1337",
   "http://localhost:8000",
   "http://127.0.0.1:3000",
+  "http://127.0.0.1:1337",
   "http://127.0.0.1:8000",
 ]);
 

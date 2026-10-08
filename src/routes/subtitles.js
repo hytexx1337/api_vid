@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { SUB_TTL } from "../config/constants.js";
-import { cacheGet, cacheSet } from "../lib/cache.js";
+import { cacheGet, cacheSet, getManualTracks } from "../lib/cache.js";
 import { getProxyBase } from "../lib/proxy.js";
 import { buildTracks, getVidrkSubsWithIndex } from "../lib/subtitles.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
@@ -24,26 +24,17 @@ async function resolveMovieTvSubs(tmdbId, type, season, episode, proxyBase) {
   return result;
 }
 
-async function resolveAnimeSubs(anilistId, episode, proxyBase) {
-  const { getCRSubsForAnime } = await import("../providers/index.js");
-  const cacheKey = `subs:anime:${anilistId}:${episode}`;
+async function resolveAnimeSubs(anilistId, episode) {
+  const cacheKey = `subs:anime:manual:v1:${anilistId}:${episode}`;
   const cached = cacheGet(cacheKey);
   if (cached) return cached;
 
-  const crTracks = await getCRSubsForAnime(anilistId, parseInt(episode)).catch(() => []);
-  // Los tracks de CR ya vienen descargados/archivados por getCRSubsForAnime
-  // (a R2 o a disco local, ver scraper-crunchyroll.js) — no hace falta
-  // pasarlos por buildTracks/downloadSubtitles (ese pipeline es para
-  // providers que dan URLs externas crudas sin cachear).
-  const tracks = crTracks?.length
-    ? crTracks.map(t => ({
-        label: t.label,
-        lang: t.lang,
-        url: t.r2 ? buildPublicR2Url(`subs/${t.file}`) : `${proxyBase}/subs/${t.file}`,
-        kind: t.format === "vtt" ? "captions" : "subtitles",
-        ...(t.default && { default: true }),
-      }))
-    : [];
+  const tracks = getManualTracks(anilistId, episode).map(t => ({
+    label: t.label,
+    lang: t.lang,
+    url: buildPublicR2Url(`subs/${t.file}`),
+    kind: t.kind || "subtitles",
+  }));
 
   const result = { subtitles: tracks };
   if (tracks.length > 0) cacheSet(cacheKey, result, SUB_TTL);
@@ -68,8 +59,7 @@ router.get("/subtitles/tv/:tmdbId/:season/:episode", async (req, res) => {
 router.get("/subtitles/anime/:anilistId/:episode", async (req, res) => {
   try {
     const { anilistId, episode } = req.params;
-    const proxyBase = getProxyBase(req);
-    res.json(await resolveAnimeSubs(anilistId, episode, proxyBase));
+    res.json(await resolveAnimeSubs(anilistId, episode));
   } catch (err) { res.status(err.status ?? 502).json({ error: err.message }); }
 });
 

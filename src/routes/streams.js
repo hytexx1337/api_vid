@@ -35,8 +35,6 @@ import {
   getCuevanaMovieStreams,
   getMegaplayStreams,
   getMegavidStream,
-  getCRSubsForAnime,
-  getMiruroStreams,
   getAnikotoStreams,
   getVaplayerStream,
   getVidupStream,
@@ -47,7 +45,6 @@ import {
   getReanimeStreams,
   getAniwavesStreams,
   getAnimeheavenStreams,
-  WANTED_ASS_LANGS,
 } from "../providers/index.js";
 
 const router = Router();
@@ -267,10 +264,6 @@ function buildStableSubtitleUrl(proxyBase, file) {
   return `${proxyBase}/subs/${file}`;
 }
 
-function buildSubtitleDeliveryUrl(proxyBase, file, fromR2 = false) {
-  return fromR2 ? buildPublicR2Url(`subs/${file}`) : buildStableSubtitleUrl(proxyBase, file);
-}
-
 function isDubLikeLang(lang) {
   return /DUB|LAT/.test(lang || "");
 }
@@ -386,7 +379,7 @@ function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyB
   // archiveHlsToR2 fallaría en assertR2Env por cada candidato y solo
   // ensuciaría el log.
   if (!isR2Configured()) return;
-  const internalBase = `http://127.0.0.1:${process.env.PORT || 8000}`;
+  const internalBase = `http://127.0.0.1:${process.env.PORT || 1337}`;
   for (const [lang, priorityList] of Object.entries(R2_AUTO_ARCHIVE_PRIORITY)) {
     if (r2Archived[lang]) continue;
     if (isQueuedOrArchiving(anilistId, episode, lang)) continue;
@@ -410,35 +403,6 @@ async function buildMovieTvTracks(tmdbId, type, season, episode, proxyBase) {
 }
 
 async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime) {
-  const [crTracks] = await Promise.all([
-    getCRSubsForAnime(anilistId, parseInt(episode)).then(r => r ?? []).catch(() => []),
-  ]);
-  const ASS_LABELS = { "en-US": "English", "es-419": "Español latino", "es-ES": "Español" };
-
-  // Tracks de CR:
-  //   - Si t.file existe → CR ya lo descargó y lo persistió en disco/R2.
-  //   - Si t.url existe y !t.file → hotpath raw firmado de Crunchy. Ya fue
-  //     probado desde otras IPs, así que lo servimos directo y dejamos R2 en BG.
-  const crToUrl = (t) => {
-    if (t.file) return buildSubtitleDeliveryUrl(proxyBase, t.file, !!t.r2);
-    return t.url;
-  };
-  const vttTracks = (crTracks || []).filter(t => t.format === "vtt").map(t => ({
-    label: t.lang === "en-US" ? "English CC" : normalizeSubLabel(t.label, t.lang),
-    lang: t.lang,
-    url: crToUrl(t),
-    kind: "captions",
-    ...(t.default && { default: true }),
-  }));
-
-  const assTracks = (crTracks || []).filter(t => t.format === "ass" && WANTED_ASS_LANGS.has(t.lang)).map(t => ({
-    label: ASS_LABELS[t.lang] || t.label || t.lang,
-    lang: t.lang,
-    url: crToUrl(t),
-    kind: "subtitles",
-    ...(t.default && { default: true }),
-  }));
-
   const megaplayTracks = [];
   const seenMpUrls = new Set();
   for (const mp of [megaplayDub, megaplaySub]) {
@@ -454,8 +418,8 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
   // pipeline genérico de descarga/cacheo local.
   const processedMegaplay = megaplayTracks.length ? await buildTracks(megaplayTracks, proxyBase) : [];
 
-  // Tracks manuales: subs subidos a R2 (subs/{file}) desde el panel externo
-  // y registrados en manual_tracks. Se sirven con URL firmada como los de CR.
+  // Tracks manuales: subs subidos a R2 (subs/{file}) desde el downloader
+  // y registrados en manual_tracks. No disparamos scraper-crunchyroll.js.
   const manualTracks = getManualTracks(anilistId, episode).map(t => ({
     label: t.label,
     lang: t.lang,
@@ -483,7 +447,7 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
     processedReanime = [...readyInR2, ...fallbackTracks];
   }
 
-  const rawTracks = [...vttTracks, ...assTracks, ...processedMegaplay, ...manualTracks, ...processedReanime];
+  const rawTracks = [...processedMegaplay, ...manualTracks, ...processedReanime];
   return normalizeSubtitleTracks(rawTracks);
 }
 
@@ -655,7 +619,7 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), o
   };
 
   const HARDSUB_TIMEOUT = 6_000;
-  const SCRAPER_TIMEOUT_FAST = 1_800;   // megaplay/megavid/cuevana/cr-subs/aniskip
+  const SCRAPER_TIMEOUT_FAST = 1_800;   // megaplay/megavid/cuevana/aniskip
   const SCRAPER_TIMEOUT_MED = 8_000;    // animeav1 (búsqueda + servers)
   const withTimeout = (name, ms, promise) => Promise.race([
     promise,
@@ -692,10 +656,6 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), o
       for (const c of v ?? []) if (c?.url) pw({ url: c.url, headers: c.headers, type: c.url.includes(".mp4") ? "mp4" : "hls", originalProvider: "embed69" });
       return v;
     })))],
-    // NUNCA meter cr-subs con timeout 1800ms como provider FAST (pedido user 2026-10-07):
-    //  - buildAnimeTracks YA llama getCRSubsForAnime independientemente (L414).
-    //  - crInflight Map DUPLICABA dedup incierto y cortaba con 1800ms arbitrario.
-    //  - Se ejecuta 1 SOLA VEZ: resolveCRSubs L803 dentro de buildAnimeTracks.
     ["miruro",      () => skip("miruro") ? Promise.resolve({ dub: [], sub: [] }) : timed2("miruro", withTimeout("miruro", SCRAPER_TIMEOUT_MED, (isProviderEnabled("miruro") ? getMiruroStreams(anilistId, parseInt(episode)) : Promise.resolve({ dub: [], sub: [] })).then(v => {
       for (const s of [...(v?.dub ?? []), ...(v?.sub ?? [])]) if (s?.url) pw({ url: s.url, headers: s.headers, type: "hls", originalProvider: `miruro-${s.provider}` });
       return v;
@@ -781,7 +741,6 @@ function buildResolveResult(settled, anilistId, episode, skipProviders, mode = "
     ["megaplay",   read("megaplay", { dub: null, sub: null }),  v => `dub=${!!v?.dub} sub=${!!v?.sub}`],
     ["megavid",    read("megavid", null),   v => (v?.url ? "ok" : "null")],
     ["cuevana",    read("cuevana", []),   v => `${v?.length ?? 0} streams`],
-    ["cr-subs",    read("cr-subs", []),    v => `${v?.length ?? 0} tracks`],
     ["miruro",     read("miruro", { dub: [], sub: [] }),    v => `dub=${v?.dub?.length ?? 0} sub=${v?.sub?.length ?? 0}`],
     ["anikoto",    read("anikoto", { sub: [], dub: [], hsub: [] }),   v => `sub=${v?.sub?.length ?? 0} dub=${v?.dub?.length ?? 0}`],
     ["aniwaves",   read("aniwaves", { sub: [] }),  v => `sub=${v?.sub?.length ?? 0}`],
@@ -805,10 +764,6 @@ function buildResolveResult(settled, anilistId, episode, skipProviders, mode = "
   const cuevanaStreams = read("cuevana", []);
   if (reasonOf("cuevana")) console.warn(`[anime] embed69 ✗:`, reasonOf("cuevana")?.message);
 
-  const crTracks = read("cr-subs", []);
-  const crTracksOut = (crTracks && crTracks.length) ? crTracks : null;
-  if (reasonOf("cr-subs")) console.warn("[anime] cr-subs ✗:", reasonOf("cr-subs")?.message);
-
   const megaplayBoth = read("megaplay", { dub: null, sub: null });
   const miruro = read("miruro", { dub: null, sub: null });
   if (reasonOf("miruro")) console.warn("[anime] miruro ✗:", reasonOf("miruro")?.message);
@@ -822,7 +777,7 @@ function buildResolveResult(settled, anilistId, episode, skipProviders, mode = "
   if (reasonOf("animeheaven")) console.warn("[anime] animeheaven ✗:", reasonOf("animeheaven")?.message);
 
   lap("summary+unpack done");
-  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, crTracks: crTracksOut, miruro, anikoto, aniwaves, animeheaven, aniskip: aniskipVal };
+  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, miruro, anikoto, aniwaves, animeheaven, aniskip: aniskipVal };
 }
 
 async function getReanimeCached(anilistId, episode, cacheKey) {
@@ -941,8 +896,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const proxyBase = getProxyBase(req);
   const perf = createAnimePerfLogger(anilistId, episode);
 
-      // v15: invalida bundles con proxy_url viejo de zilla-networks en animeav1.
-      const cacheKey = `streams:anime:v15:${anilistId}:${episode}`;
+      // v16: deshabilita scraper-crunchyroll.js; tracks Crunchy ahora entran como manual/R2.
+      const cacheKey = `streams:anime:v16:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v11:${anilistId}:${episode}`;
   const respKey = `resp:${cacheKey}:${proxyBase}`;
   perf.lap("route start (headers set)");
@@ -1049,7 +1004,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       perf.lap("resp coalesce inner cache miss");
     }
 
-    const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, crTracks, miruro, anikoto, aniwaves, animeheaven, aniskip, reanime } = data;
+    const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, miruro, anikoto, aniwaves, animeheaven, aniskip, reanime } = data;
     perf.lap("about to start buildAnimeTracks (in parallel with stream build)");
     const tracksPromise = buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
     if (reanimeData) cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
@@ -1266,7 +1221,12 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     const normalized = normalizeProxyStreamTypes(streams);
     const cleaned = filterBrokenProviderLangCombos(normalized, { context: `anime/${anilistId}/${episode}` });
     const sorted = sortStreams(cleaned);
-    const grouped = [...sorted.filter(s => isDubLang(s.lang)), ...sorted.filter(s => !isDubLang(s.lang))];
+    const isZenkaiStream = (s) => String(s.originalProvider || "") === "zenkai";
+    const grouped = [
+      ...sorted.filter(s => isZenkaiStream(s)),
+      ...sorted.filter(s => !isZenkaiStream(s) && isDubLang(s.lang)),
+      ...sorted.filter(s => !isZenkaiStream(s) && !isDubLang(s.lang)),
+    ];
     const playable = await filterPlayableStreams(grouped);
     perf.lap("filterPlayableStreams done", { inCount: grouped.length, outCount: playable.length });
     const withDisplay = assignDisplayProviders(playable);
