@@ -345,10 +345,15 @@ function syncReanimeThumbnailMetadata(anilistId, episode, reanime) {
 // Mismo criterio de prioridad de provider por idioma que scripts/r2-select.js.
 const R2_AUTO_ARCHIVE_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
-  "ENG-DUB": ["reanime", "megaplay", "anikoto", "megavid", "miruro"],
+  "ENG-DUB": ["megaplay", "anikoto", "megavid", "miruro"],
   "JAP-ES-HS": ["animeav1"],
   "JAP-EN-HS": ["anikoto-hsub", "aniwaves", "animeheaven", "miruro"],
 };
+
+const REANIME_MULTI_AUDIO_TRACKS = [
+  { id: "ja", lang: "ja", code: "JAP-SUB", label: "Japonés", original: true, default: true },
+  { id: "en", lang: "en", code: "ENG-DUB", label: "Inglés", dub: true },
+];
 
 // Devuelve TODOS los candidatos ordenados por prioridad de provider, para que
 // el job de archivado pueda caer al siguiente si el primero falla (ej. la URL
@@ -392,6 +397,25 @@ function archiveLangAlreadyCovered(r2Archived, lang) {
   return false;
 }
 
+function reanimeMultiSource(reanime) {
+  if (!reanime?.dub?.url) return null;
+  return reanime.dub;
+}
+
+function reanimeSkipOf(item) {
+  if (!item) return null;
+  const introRange = item.intro ? [item.intro.start, item.intro.end] : (item.introStart != null ? [item.introStart, item.introEnd] : null);
+  const outroRange = item.outro ? [item.outro.start, item.outro.end] : (item.outroStart != null ? [item.outroStart, item.outroEnd] : null);
+  return (introRange || outroRange) ? { ...(introRange && { intro: introRange }), ...(outroRange && { outro: outroRange }) } : null;
+}
+
+function buildReanimeRiverProxyUrl(proxyBase, item, { multi = false, audio = null } = {}) {
+  const flixPayload = { u: item.url };
+  if (!multi && audio) flixPayload.audio = audio;
+  if (item.manifest_key) flixPayload.k = item.manifest_key;
+  return `${proxyBase}/river.m3u8?${sealedQueryParam(flixPayload)}`;
+}
+
 // Encola a R2 los idiomas que todavía no están archivados. proxy_url apunta
 // al dominio público (proxyBase); para el fetch interno del archivador se usa
 // loopback directo, evitando un salto de ida y vuelta por internet.
@@ -401,7 +425,28 @@ function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyB
   // ensuciaría el log.
   if (!isR2Configured()) return;
   const internalBase = `http://127.0.0.1:${process.env.PORT || 1337}`;
+  let multiQueuedOrCovered = multiArchiveCoversLang(r2Archived, "ENG-DUB");
+  if (!r2Archived.MULTI && !isQueuedOrArchiving(anilistId, episode, "MULTI")) {
+    const multiCandidates = pickArchiveCandidates(streams, "MULTI", ["reanime"]);
+    if (multiCandidates.length) {
+      const jobCandidates = multiCandidates.map((c) => ({
+        streamUrl: c.proxy_url.startsWith(proxyBase)
+          ? internalBase + c.proxy_url.slice(proxyBase.length)
+          : c.proxy_url,
+        sourceProvider: c.originalProvider,
+      }));
+      enqueueArchiveJob({
+        animeId: anilistId,
+        episode,
+        lang: "MULTI",
+        candidates: jobCandidates,
+        tracks: { audioTracks: REANIME_MULTI_AUDIO_TRACKS },
+      });
+      multiQueuedOrCovered = true;
+    }
+  }
   for (const [lang, priorityList] of Object.entries(R2_AUTO_ARCHIVE_PRIORITY)) {
+    if (lang === "ENG-DUB" && multiQueuedOrCovered) continue;
     if (archiveLangAlreadyCovered(r2Archived, lang)) continue;
     if (isQueuedOrArchiving(anilistId, episode, lang)) continue;
     const candidates = pickArchiveCandidates(streams, lang, priorityList);
@@ -942,7 +987,14 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     console.log(`[anime:zenkai] r2 keys raw=${JSON.stringify(Object.keys(r2Archived))} | built langs=${zenkaiStreams.map(s=>s.lang).join(",")}`);
     if (zenkaiStreams.length) {
       const ok = await filterPlayableStreams(zenkaiStreams, { allowEmpty: true });
-      for (const s of ok) coveredLangs.add(s.lang);
+      for (const s of ok) {
+        coveredLangs.add(s.lang);
+        if (s.lang === "MULTI" && Array.isArray(s.audioTracks)) {
+          for (const track of s.audioTracks) {
+            if (track?.code) coveredLangs.add(String(track.code).toUpperCase());
+          }
+        }
+      }
       console.log(`[anime:zenkai] AFTER verify coveredLangs=${[...coveredLangs].join(",")} | dropped=${zenkaiStreams.length-ok.length} (stream(s) R2 con signature muerta? verify KO)`);
     } else {
       console.warn(`[anime] zenkai ${anilistId}/${episode}: archivado pero sin URLs firmadas (falta R2_SEAL_SECRET/R2_WORKER_BASE)`);
@@ -1038,20 +1090,47 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     perf.lap("buildZenkaiStreams push done", { count: streams.length });
 
     const downloads = [];
+    const reanimeMulti = reanimeMultiSource(reanime);
+    if (reanimeMulti?.url) {
+      const originalProvider = `reanime-${reanimeMulti.server}`;
+      const s = makeAnimeStream(proxyBase, maskRawUrl(reanimeMulti.url), "auto", "MULTI", originalProvider, { skip: reanimeSkipOf(reanimeMulti) });
+      s.langLabel = "Multi audio";
+      s.multiAudio = true;
+      s.audioTracks = REANIME_MULTI_AUDIO_TRACKS;
+      s.proxy_url = buildReanimeRiverProxyUrl(proxyBase, reanimeMulti, { multi: true });
+      if (reanimeMulti.downloadLink) {
+        const rawDl = typeof reanimeMulti.downloadLink === "string" && reanimeMulti.downloadLink.startsWith("sealed:")
+          ? (unmaskRawUrl(reanimeMulti.downloadLink) || reanimeMulti.downloadLink)
+          : reanimeMulti.downloadLink;
+        downloads.push({ lang: "MULTI", langLabel: "Multi audio", server: publicDownloadServer(originalProvider), url: `${proxyBase}/dl?x=${sealQueryPayload({ url: rawDl, hint: originalProvider })}` });
+      }
+      if (reanimeMulti.available_fonts && Object.keys(reanimeMulti.available_fonts).length) {
+        s.available_fonts = reanimeMulti.available_fonts;
+      }
+      if (Array.isArray(reanimeMulti.extracted_fonts) && reanimeMulti.extracted_fonts.length) {
+        s.extracted_fonts = reanimeMulti.extracted_fonts;
+      }
+      const r2ThumbnailVtt = reanimeMulti.r2_thumbnail_vtt_key
+        ? buildPublicR2Url(reanimeMulti.r2_thumbnail_vtt_key)
+        : reanimeMulti.r2_thumbnail_vtt;
+      if (r2ThumbnailVtt) {
+        s.thumbnailVtt = r2ThumbnailVtt;
+        s.thumbnailVttProxy = r2ThumbnailVtt;
+      } else if (reanimeMulti.thumbnails_vtt) {
+        s.thumbnailVtt = maskRawUrl(reanimeMulti.thumbnails_vtt);
+        s.thumbnailVttProxy = `${proxyBase}/fetch?${sealedQueryParamDeterministic({ url: reanimeMulti.thumbnails_vtt, ref: "https://flixcloud.cc/", ct: "text/vtt" })}`;
+      }
+      streams.push(s);
+    }
 
-    for (const [item, lang, audioTrack] of [
+    for (const [item, lang, audioTrack] of reanimeMulti ? [] : [
       [reanime?.sub, "japanese", "jpn"],
       [reanime?.dub, "en-dub", "eng"],
     ]) {
       if (!item?.url) continue;
       const originalProvider = `reanime-${item.server}`;
-      const introRange = item.intro ? [item.intro.start, item.intro.end] : (item.introStart != null ? [item.introStart, item.introEnd] : null);
-      const outroRange = item.outro ? [item.outro.start, item.outro.end] : (item.outroStart != null ? [item.outroStart, item.outroEnd] : null);
-      const skip = (introRange || outroRange) ? { ...(introRange && { intro: introRange }), ...(outroRange && { outro: outroRange }) } : null;
-      const s = makeAnimeStream(proxyBase, maskRawUrl(item.url), "auto", lang, originalProvider, { skip });
-      const flixPayload = { u: item.url, audio: audioTrack };
-      if (item.manifest_key) flixPayload.k = item.manifest_key;
-      s.proxy_url = `${proxyBase}/river.m3u8?${sealedQueryParam(flixPayload)}`;
+      const s = makeAnimeStream(proxyBase, maskRawUrl(item.url), "auto", lang, originalProvider, { skip: reanimeSkipOf(item) });
+      s.proxy_url = buildReanimeRiverProxyUrl(proxyBase, item, { audio: audioTrack });
       if (item.downloadLink) {
         const rawDl = typeof item.downloadLink === "string" && item.downloadLink.startsWith("sealed:")
           ? (unmaskRawUrl(item.downloadLink) || item.downloadLink)
@@ -1223,12 +1302,6 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     const isDubLang = (lang) => isDubLikeLang(lang);
     const megaplayDubSkip = megaplayDub && Object.keys(megaplayDub.skip || {}).length ? megaplayDub.skip : null;
     const megaplaySubSkip = megaplaySub && Object.keys(megaplaySub.skip || {}).length ? megaplaySub.skip : null;
-    const reanimeSkipOf = (item) => {
-      if (!item) return null;
-      const intro = item.intro ? [item.intro.start, item.intro.end] : (item.introStart != null ? [item.introStart, item.introEnd] : null);
-      const outro = item.outro ? [item.outro.start, item.outro.end] : (item.outroStart != null ? [item.outroStart, item.outroEnd] : null);
-      return (intro || outro) ? { ...(intro && { intro }), ...(outro && { outro }) } : null;
-    };
     const reanimeDubSkip = reanimeSkipOf(reanime?.dub);
     const reanimeSubSkip = reanimeSkipOf(reanime?.sub);
     for (const s of streams) {

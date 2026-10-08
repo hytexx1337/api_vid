@@ -46,7 +46,7 @@ export function isQueuedOrArchiving(animeId, episode, lang) {
  * entre providers, ej. megaplay caído -> anikoto -> megavid).
  * También acepta la forma vieja { streamUrl, sourceProvider } por compat.
  */
-export function enqueueArchiveJob({ animeId, episode, lang, streamUrl, sourceProvider, candidates }) {
+export function enqueueArchiveJob({ animeId, episode, lang, streamUrl, sourceProvider, candidates, tracks }) {
   const k = jobKey(animeId, episode, lang);
   if (inFlight.has(k)) return false;
 
@@ -56,7 +56,7 @@ export function enqueueArchiveJob({ animeId, episode, lang, streamUrl, sourcePro
   if (!list.length) return false;
 
   inFlight.add(k);
-  queue.push({ animeId, episode, lang, candidates: list, k });
+  queue.push({ animeId, episode, lang, candidates: list, tracks, k });
   console.log(`[r2-queue] encolado ${k} (cola: ${queue.length}, activos: ${active}, candidatos: ${list.length})`);
   processNext();
   return true;
@@ -73,14 +73,14 @@ function processNext() {
   });
 }
 
-async function runJob({ animeId, episode, lang, candidates, k }) {
+async function runJob({ animeId, episode, lang, candidates, tracks, k }) {
   const slug = `${animeId}-${episode}-${lang.toLowerCase()}`;
   const t0 = Date.now();
   for (const { streamUrl, sourceProvider } of candidates) {
     try {
       console.log(`[r2-queue] archivando ${k} -> ${slug} desde ${sourceProvider} ...`);
       const { bytes } = await archiveHlsToR2(streamUrl, slug);
-      upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes });
+      upsertR2Archive({ animeId, episode, lang, slug, sourceProvider, bytes, tracks });
       console.log(`[r2-queue] listo ${k} en ${((Date.now() - t0) / 1000).toFixed(1)}s, ${(bytes / 1024 / 1024).toFixed(1)} MB (${sourceProvider})`);
       return;
     } catch (e) {
