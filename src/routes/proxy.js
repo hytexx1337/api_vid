@@ -1,8 +1,10 @@
 import { Router } from "express";
 import { HttpsProxyAgent } from "https-proxy-agent";
+import { execFile } from "child_process";
 import { createGunzip, createInflate, createBrotliDecompress, gunzipSync } from "zlib";
 import { existsSync } from "fs";
-import { readFile } from "fs/promises";
+import { readFile, unlink } from "fs/promises";
+import { tmpdir } from "os";
 import path from "path";
 import { sealProxyUrlsInText, unsealProxyPath, tryUnsealQueryPayload, sealedQueryParam, sealedQueryParamDeterministic } from "../lib/proxy-seal.js";
 import { buildPublicR2Url } from "../lib/r2-seal.js";
@@ -133,17 +135,49 @@ function cleanFlixcloudUrl(value) {
   return String(value || "").trim().replace(/^`+|`+$/g, "");
 }
 
-function flixcloudRequestHeaders() {
-  return {
-    "User-Agent": HEADERS["User-Agent"],
-    Accept: "*/*",
-    "Accept-Language": "es-419,es;q=0.9,en;q=0.8",
-    Referer: FLIXCLOUD_REFERER,
-    Origin: "https://flixcloud.cc",
-    "Sec-Fetch-Site": "same-site",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Dest": "empty",
-  };
+function curlFlixcloudBuffer(url) {
+  const outFile = path.join(tmpdir(), `flixcloud-${Date.now()}-${Math.random().toString(16).slice(2)}.bin`);
+  const args = [
+    "-4",
+    "-L",
+    "--silent",
+    "--show-error",
+    "--max-time", "20",
+    "--output", outFile,
+    "--write-out", "%{http_code}",
+    "-H", `User-Agent: ${HEADERS["User-Agent"]}`,
+    "-H", "Accept: */*",
+    "-H", "Accept-Language: es-419,es;q=0.9,en;q=0.8",
+    "-H", `Referer: ${FLIXCLOUD_REFERER}`,
+    "-H", "Origin: https://flixcloud.cc",
+    "-H", "Sec-Fetch-Site: same-site",
+    "-H", "Sec-Fetch-Mode: cors",
+    "-H", "Sec-Fetch-Dest: empty",
+    url,
+  ];
+
+  return new Promise((resolve, reject) => {
+    execFile("curl", args, { timeout: 25_000, maxBuffer: 1024 * 1024 }, async (error, stdout, stderr) => {
+      const status = Number(String(stdout || "").trim());
+      try {
+        const body = await readFile(outFile).catch(() => Buffer.alloc(0));
+        await unlink(outFile).catch(() => {});
+        if (error) {
+          const detail = String(stderr || error.message || "curl failed").trim();
+          reject(Object.assign(new Error(`curl flixcloud failed: ${detail}`), { status: status || 502 }));
+          return;
+        }
+        if (!status || status < 200 || status >= 300) {
+          reject(Object.assign(new Error(`Upstream error: ${status || "unknown"}`), { status: status || 502, body }));
+          return;
+        }
+        resolve(body);
+      } catch (e) {
+        await unlink(outFile).catch(() => {});
+        reject(e);
+      }
+    });
+  });
 }
 
 function rewriteFlixcloudPlaylist(text, baseUrl, proxyBase, onlyAudioLang, manifestKey) {
@@ -209,15 +243,7 @@ async function handleRiverSegment(req, res) {
   const target = cleanFlixcloudUrl((sealed?.u) || req.query.u);
   if (!target) return res.status(400).json({ error: "Missing target" });
   try {
-    const upstream = await fetch(target, {
-      headers: flixcloudRequestHeaders(),
-      signal: AbortSignal.timeout(20000),
-    });
-    if (!upstream.ok) {
-      if (upstream.status === 403 || upstream.status === 404) invalidateStreamsContainingUrl(target);
-      return res.status(upstream.status).json({ error: `Upstream error: ${upstream.status}` });
-    }
-    const raw = Buffer.from(await upstream.arrayBuffer());
+    const raw = await curlFlixcloudBuffer(target);
     const decrypted = decryptFlixcloudSegment(raw);
     const isKey = /\/key\.bin(?:\?|$)/i.test(new URL(target).pathname);
     const contentType = isKey ? "application/octet-stream" : "video/mp2t";
@@ -226,6 +252,7 @@ async function handleRiverSegment(req, res) {
     res.send(decrypted);
   } catch (e) {
     console.warn(`[river-seg] ERROR: ${e.message}`);
+    if (e.status === 403 || e.status === 404) invalidateStreamsContainingUrl(target);
     res.status(e.status || 500).json({ error: e.message });
   }
 }
