@@ -102,7 +102,7 @@ router.delete("/admin/api/cr-index/:key", (req, res) => {
 // episodio aparezca servido en /anime/:id/:episode.
 
 // Langs válidos = los grupos que streams.js sabe servir desde r2_archive.
-const VALID_ARCHIVE_LANGS = new Set(["ESP-LAT", "ENG-DUB", "JAP-ES-HS", "JAP-EN-HS", "MULTI"]);
+const VALID_ARCHIVE_LANGS = new Set(["ESP-LAT", "ENG-DUB", "JAP-SUB", "JAP-ES-HS", "JAP-EN-HS", "MULTI"]);
 
 function normalizeArchiveTracks({ tracks, audioTracks, subtitleTracks }) {
   const src = tracks && typeof tracks === "object" ? tracks : { audioTracks, subtitleTracks };
