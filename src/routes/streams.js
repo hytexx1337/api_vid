@@ -43,6 +43,7 @@ import {
   getVidyStream,
   getVidstuckStream,
   getVixsrcStream,
+  getMiruroStreams,
   getReanimeStreams,
   getReanimeSubtitleSidecar,
   getAniwavesStreams,
@@ -792,7 +793,7 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), o
     })))],
     ["aniskip",     () => timed2("aniskip", withTimeout("aniskip", SCRAPER_TIMEOUT_FAST, anilistToMal(anilistId).then(malId => getAnimeSkip(malId, parseInt(episode)))))],
     ["aniwaves",    () => skip("aniwaves") ? Promise.resolve({ sub: [] }) : timed2("aniwaves", (isProviderEnabled("aniwaves") ? withTimeout("aniwaves", HARDSUB_TIMEOUT, getAniwavesStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] })))],
-    ["animeheaven", () => skip("animeheaven") ? Promise.resolve({ sub: [] }) : timed2("animeheaven", (isProviderEnabled("animeheaven") ? withTimeout("animeheaven", HARDSUB_TIMEOUT, getAnimeheavenStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [] })))],
+    ["animeheaven", () => skip("animeheaven") ? Promise.resolve({ sub: [] }) : timed2("animeheaven", (isProviderEnabled("animeheaven") ? withTimeout("animeheaven", HARDSUB_TIMEOUT, getAnimeheavenStreams(anilistId, parseInt(episode))) : Promise.resolve({ sub: [], _disabled: true })))],
   ];
 
   // ── Hybrid budget: RACE providers all-settled × budgetMs ──────────────
@@ -872,6 +873,7 @@ function buildResolveResult(settled, anilistId, episode, skipProviders, mode = "
     ["aniskip",    read("aniskip", null),   v => (v ? "ok" : "null")],
   ].map(([name, value, fmt]) => {
     if (name === "animeav1" && value?._downloadsCacheHit) return `✅ ${name}(${fmt(value)})`;
+    if (value?._disabled) return `🚫 ${name}(disabled)`;
     if (skipProviders.has(name)) return `⏭️ ${name}(zenkai)`;
     const reason = reasonOf(name);
     if (reason) return `❌ ${name}(${reason.message ?? "?"})`;
