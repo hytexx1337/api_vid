@@ -10,7 +10,7 @@
  *     `queue`. Cada job baja un episodio completo (~150-300MB), así que no
  *     conviene muchos concurrentes para no saturar CPU/bandwidth del server.
  *     Por default en 4: coincide con la cantidad de grupos de idioma que
- *     archivamos hoy (ESP-LAT, ENG-DUB, JAP-ES-HS, JAP-EN-HS) — son origins
+ *     archivamos hoy (ESP-LAT, ENG-DUB, JAP-EN-HS, MULTI) — son origins
  *     distintos entre sí, así que no tiene sentido serializarlos (ver
  *     scripts/r2-select.js, que ya los corre en paralelo con Promise.all).
  *   - Al terminar (OK o error) se libera el slot y se persiste en

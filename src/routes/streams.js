@@ -379,7 +379,6 @@ function syncReanimeThumbnailMetadata(anilistId, episode, reanime) {
 const R2_AUTO_ARCHIVE_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
   "ENG-DUB": ["megaplay", "anikoto", "megavid", "miruro"],
-  "JAP-ES-HS": ["animeav1"],
   "JAP-EN-HS": ["anikoto-hsub", "aniwaves", "animeheaven", "miruro"],
 };
 
