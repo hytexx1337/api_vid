@@ -8,7 +8,7 @@ import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { isR2Configured } from "../lib/hls-to-r2.js";
 import { archiveSubtitleTracksToR2, archiveThumbnailVttToR2 } from "../lib/reanime-r2.js";
 import { getProxyBase } from "../lib/proxy.js";
-import { buildTracks, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel, detectTrackLang, normalizeSubtitleTracks } from "../lib/subtitles.js";
+import { buildTracks, readCrIndex, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel, detectTrackLang, normalizeSubtitleTracks } from "../lib/subtitles.js";
 import { sealProxyUrls, sealedQueryParam, sealedQueryParamDeterministic, sealQueryPayload, maskRawUrl, unmaskRawUrl } from "../lib/proxy-seal.js";
 import { filterPlayableStreams, prewarmVerify } from "../lib/stream-verify.js";
 import { createRateLimiter } from "../lib/rate-limit.js";
@@ -264,6 +264,23 @@ function buildStableSubtitleUrl(proxyBase, file) {
   return `${proxyBase}/subs/${file}`;
 }
 
+function labelCrIndexedTrack(track) {
+  const rawLabel = String(track?.label || "").trim();
+  const locale = String(track?.lang || rawLabel).trim();
+  const base = rawLabel && !/^[a-z]{2,3}(?:[-_][a-z0-9]{2,3})?$/i.test(rawLabel)
+    ? rawLabel
+    : locale.toLowerCase().startsWith("es-419") || locale.toLowerCase().startsWith("es-mx")
+      ? "Español Latino"
+      : locale.toLowerCase().startsWith("es-es")
+        ? "Español"
+        : locale.toLowerCase().startsWith("en")
+          ? "English"
+          : rawLabel || locale || "Unknown";
+  return String(track?.format || track?.type || "").toLowerCase() === "vtt" && !/\bcc\b/i.test(base)
+    ? `${base} CC`
+    : base;
+}
+
 function isDubLikeLang(lang) {
   return /DUB|LAT/.test(lang || "");
 }
@@ -493,6 +510,25 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
     kind: t.kind || "subtitles",
   }));
 
+  const crIndexedTracks = (readCrIndex()[`${anilistId}:${episode}`] || [])
+    .filter((t) => t?.file)
+    .map((t) => {
+      const type = String(t.format || t.type || "").toLowerCase();
+      const isCaption = t.kind === "captions" || t.cc === true || type === "vtt";
+      return {
+        label: labelCrIndexedTrack(t),
+        lang: t.lang,
+        url: buildStableSubtitleUrl(proxyBase, t.file),
+        type,
+        kind: t.kind || (isCaption ? "captions" : "subtitles"),
+        default: !!t.default,
+        ...(typeof t.ai === "boolean" && { ai: t.ai }),
+        cc: isCaption,
+        ...(typeof t.forced === "boolean" && { forced: t.forced }),
+        ...(t.r2 && { r2: true }),
+      };
+    });
+
   // Subtítulos de reanime.to (flixcloud.cc): se extraen del embed ANTES de
   // decriptar la URL final del stream, así que quedan disponibles aunque el
   // stream en sí termine dando 403 al reproducir (token de flixcloud vencido,
@@ -513,7 +549,7 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
     processedReanime = [...readyInR2, ...fallbackTracks];
   }
 
-  const rawTracks = [...processedMegaplay, ...manualTracks, ...processedReanime];
+  const rawTracks = [...crIndexedTracks, ...processedMegaplay, ...manualTracks, ...processedReanime];
   return normalizeSubtitleTracks(rawTracks);
 }
 
@@ -686,7 +722,7 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), o
 
   const HARDSUB_TIMEOUT = 6_000;
   const SCRAPER_TIMEOUT_FAST = 1_800;   // megaplay/megavid/cuevana/aniskip
-  const SCRAPER_TIMEOUT_MED = 8_000;    // animeav1 (búsqueda + servers)
+  const SCRAPER_TIMEOUT_MED = 12_000;   // animeav1/miruro (búsqueda + servers HLS)
   const withTimeout = (name, ms, promise) => Promise.race([
     promise,
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timeout ${ms}ms`)), ms)),
@@ -962,8 +998,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const proxyBase = getProxyBase(req);
   const perf = createAnimePerfLogger(anilistId, episode);
 
-      // v16: deshabilita scraper-crunchyroll.js; tracks Crunchy ahora entran como manual/R2.
-      const cacheKey = `streams:anime:v16:${anilistId}:${episode}`;
+  // v18: tracks Crunchy persistidos se hidratan desde cr-index.json sin re-scrapear CR.
+  const cacheKey = `streams:anime:v18:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v11:${anilistId}:${episode}`;
   const respKey = `resp:${cacheKey}:${proxyBase}`;
   perf.lap("route start (headers set)");
@@ -1036,7 +1072,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     const dataPromise = coalesce(cacheKey, async () => {
       const hit = cacheGet(cacheKey);
       if (hit) return hit;
-      const d = await resolveAnimeData(anilistId, episode, skipProviders, { cacheKey, globalStartTs: perf.t0, globalBudgetMs: 5000 });
+      const d = await resolveAnimeData(anilistId, episode, skipProviders, { cacheKey, globalStartTs: perf.t0, globalBudgetMs: 12000 });
       const hasAny = d.megaplayDub || d.megaplaySub || d.megavid || d.latino || d.cuevanaStreams?.length || d.anikoto?.sub?.length || d.anikoto?.dub?.length || d.anikoto?.hsub?.length || d.aniwaves?.sub?.length || d.animeheaven?.sub?.length;
       if (hasAny && !skipProviders.size) {
         const t0 = Date.now();

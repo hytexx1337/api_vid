@@ -445,10 +445,14 @@ export function normalizeSubtitleTracks(tracks) {
     out.push(n);
   }
   // Marcar default inteligente: si NINGÚN track vino con default=true,
-  // elegimos el 1er subtitles lang=en.
+  // elegimos primero subtítulos normales; CC queda como fallback.
   const hasDefault = out.some(t => t.default);
   if (!hasDefault) {
-    const fallback = out.find(t => t.lang === "en" && t.kind !== "forced") || out.find(t => t.kind !== "forced");
+    const fallback =
+      out.find(t => t.lang === "en" && t.kind === "subtitles") ||
+      out.find(t => t.kind === "subtitles") ||
+      out.find(t => t.lang === "en" && t.kind !== "forced") ||
+      out.find(t => t.kind !== "forced");
     if (fallback) fallback.default = true;
   }
   return out;
