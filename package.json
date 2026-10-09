@@ -5,6 +5,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node --env-file=.env src/index.js",
+    "test": "node --test tests/*.test.mjs",
     "start:miruro": "python src/providers/miruro/server.py",
     "dev": "node --env-file=.env --watch src/index.js",
     "check": "node --check src/index.js",

@@ -401,17 +401,19 @@ export function normalizeSubtitleTrack(raw) {
     }
   }
 
+  const explicitCc = typeof raw.cc === "boolean" ? raw.cc : meta.cc;
+  const explicitForced = typeof raw.forced === "boolean" ? raw.forced : meta.forced;
   const out = {
     url,
     label: meta.label,
     lang,
     type,
     mimeType,
-    kind: meta.kind,
+    kind: explicitCc ? "captions" : (explicitForced ? "forced" : (meta.kind === "forced" ? "subtitles" : meta.kind)),
     default: !!raw.default,
     ai: meta.ai,
-    cc: meta.cc,
-    forced: meta.forced,
+    cc: explicitCc,
+    forced: explicitForced,
   };
 
   // Campos legacy / provider-specific que queremos preservar si existen:

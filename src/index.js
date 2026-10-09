@@ -7,6 +7,7 @@ import providersRouter from "./routes/providers.js";
 import debugRouter from "./routes/debug.js";
 import adminRouter from "./routes/admin.js";
 import { scheduleAnimeVerifier } from "./lib/stream-verifier.js";
+import { startOvhSyncWorker } from "./lib/ovh-sync.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -84,6 +85,7 @@ process.on("unhandledRejection", (reason) => console.error("[unhandledRejection]
 const server = app.listen(PORT, () => {
   console.log(`api_vid running on http://localhost:${PORT} [pid ${process.pid}]`);
   scheduleAnimeVerifier();
+  startOvhSyncWorker();
 });
 
 function shutdown() {

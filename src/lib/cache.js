@@ -23,8 +23,9 @@ function initDb() {
   try {
     const { DatabaseSync } = require("node:sqlite");
     const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "data");
-    fs.mkdirSync(dir, { recursive: true });
-    const dbInstance = new DatabaseSync(path.join(dir, "stream-cache.db"));
+    const dbPath = process.env.STREAM_CACHE_DB_PATH || path.join(dir, "stream-cache.db");
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+    const dbInstance = new DatabaseSync(dbPath);
     dbInstance.exec(`
       CREATE TABLE IF NOT EXISTS stream_cache (
         cache_key TEXT PRIMARY KEY,
@@ -78,6 +79,37 @@ function initDb() {
         archived_at INTEGER NOT NULL,
         PRIMARY KEY (anime_id, episode, variant)
       );
+    `);
+    dbInstance.exec(`
+      CREATE TABLE IF NOT EXISTS ovh_archive (
+        anime_id TEXT NOT NULL,
+        episode TEXT NOT NULL,
+        lang TEXT NOT NULL DEFAULT 'MULTI',
+        slug TEXT NOT NULL,
+        source_provider TEXT,
+        bytes INTEGER,
+        status TEXT NOT NULL DEFAULT 'pending',
+        hls_status TEXT,
+        assets_status TEXT,
+        registered_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        last_synced_at INTEGER,
+        next_sync_at INTEGER,
+        sync_attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        skip_intro_start REAL,
+        skip_intro_end REAL,
+        skip_outro_start REAL,
+        skip_outro_end REAL,
+        tracks_json TEXT,
+        subtitles_json TEXT,
+        thumbnails_json TEXT,
+        hls_json TEXT,
+        raw_json TEXT,
+        PRIMARY KEY (anime_id, episode, lang)
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_ovh_archive_slug ON ovh_archive(slug);
+      CREATE INDEX IF NOT EXISTS idx_ovh_archive_sync ON ovh_archive(status, next_sync_at);
     `);
     return dbInstance;
   } catch (e) {
@@ -314,6 +346,190 @@ export function deleteR2Archive(animeId, episode, lang) {
     else db.prepare(`DELETE FROM r2_archive WHERE anime_id = ? AND episode = ?`).run(String(animeId), String(episode));
   } catch (e) {
     console.warn("[cache] deleteR2Archive error:", e.message);
+  }
+}
+
+function safeJsonStringify(value) {
+  if (value == null) return null;
+  try { return JSON.stringify(value); }
+  catch { return null; }
+}
+
+function safeJsonParse(raw, fallback = null) {
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); }
+  catch { return fallback; }
+}
+
+function normalizeOvhStatus(status) {
+  const s = String(status || "pending").trim().toLowerCase();
+  if (s === "published") return "published";
+  if (s === "failed") return "failed";
+  return "pending";
+}
+
+function normalizeOvhArchiveRow(row) {
+  if (!row) return null;
+  const tracks = parseR2Tracks(row.tracks_json);
+  return {
+    animeId: row.anime_id,
+    episode: row.episode,
+    lang: row.lang,
+    slug: row.slug,
+    sourceProvider: row.source_provider,
+    bytes: row.bytes,
+    status: row.status,
+    hlsStatus: row.hls_status,
+    assetsStatus: row.assets_status,
+    registeredAt: row.registered_at,
+    updatedAt: row.updated_at,
+    lastSyncedAt: row.last_synced_at,
+    nextSyncAt: row.next_sync_at,
+    syncAttempts: row.sync_attempts ?? 0,
+    lastError: row.last_error,
+    skipIntro: row.skip_intro_start != null ? [row.skip_intro_start, row.skip_intro_end] : null,
+    skipOutro: row.skip_outro_start != null ? [row.skip_outro_start, row.skip_outro_end] : null,
+    ...(tracks?.audioTracks?.length && { audioTracks: tracks.audioTracks }),
+    ...(tracks?.subtitleTracks?.length && { subtitleTracks: tracks.subtitleTracks }),
+    subtitles: safeJsonParse(row.subtitles_json, []),
+    thumbnails: safeJsonParse(row.thumbnails_json, null),
+    hls: safeJsonParse(row.hls_json, null),
+    raw: safeJsonParse(row.raw_json, null),
+  };
+}
+
+export function upsertOvhArchive({
+  animeId,
+  episode,
+  lang = "MULTI",
+  slug,
+  sourceProvider,
+  bytes,
+  status = "pending",
+  hlsStatus = null,
+  assetsStatus = null,
+  skipIntro,
+  skipOutro,
+  tracks,
+  subtitles = null,
+  thumbnails = null,
+  hls = null,
+  raw = null,
+  lastSyncedAt = null,
+  nextSyncAt = null,
+  syncAttempts = null,
+  lastError = null,
+}) {
+  if (!db || !animeId || !episode || !lang || !slug) return false;
+  try {
+    const now = Date.now();
+    const [iStart, iEnd] = Array.isArray(skipIntro) ? skipIntro : [null, null];
+    const [oStart, oEnd] = Array.isArray(skipOutro) ? skipOutro : [null, null];
+    const tracksJson = normalizeR2Tracks(tracks) ? JSON.stringify(normalizeR2Tracks(tracks)) : null;
+    db.prepare(`
+      INSERT INTO ovh_archive (
+        anime_id, episode, lang, slug, source_provider, bytes, status, hls_status, assets_status,
+        registered_at, updated_at, last_synced_at, next_sync_at, sync_attempts, last_error,
+        skip_intro_start, skip_intro_end, skip_outro_start, skip_outro_end,
+        tracks_json, subtitles_json, thumbnails_json, hls_json, raw_json
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(anime_id, episode, lang) DO UPDATE SET
+        slug = excluded.slug,
+        source_provider = COALESCE(excluded.source_provider, ovh_archive.source_provider),
+        bytes = COALESCE(excluded.bytes, ovh_archive.bytes),
+        status = excluded.status,
+        hls_status = COALESCE(excluded.hls_status, ovh_archive.hls_status),
+        assets_status = COALESCE(excluded.assets_status, ovh_archive.assets_status),
+        updated_at = excluded.updated_at,
+        last_synced_at = COALESCE(excluded.last_synced_at, ovh_archive.last_synced_at),
+        next_sync_at = excluded.next_sync_at,
+        sync_attempts = COALESCE(excluded.sync_attempts, ovh_archive.sync_attempts),
+        last_error = excluded.last_error,
+        skip_intro_start = COALESCE(excluded.skip_intro_start, ovh_archive.skip_intro_start),
+        skip_intro_end = COALESCE(excluded.skip_intro_end, ovh_archive.skip_intro_end),
+        skip_outro_start = COALESCE(excluded.skip_outro_start, ovh_archive.skip_outro_start),
+        skip_outro_end = COALESCE(excluded.skip_outro_end, ovh_archive.skip_outro_end),
+        tracks_json = COALESCE(excluded.tracks_json, ovh_archive.tracks_json),
+        subtitles_json = COALESCE(excluded.subtitles_json, ovh_archive.subtitles_json),
+        thumbnails_json = COALESCE(excluded.thumbnails_json, ovh_archive.thumbnails_json),
+        hls_json = COALESCE(excluded.hls_json, ovh_archive.hls_json),
+        raw_json = COALESCE(excluded.raw_json, ovh_archive.raw_json)
+    `).run(
+      String(animeId), String(episode), String(lang).toUpperCase(), String(slug),
+      sourceProvider ?? null, bytes ?? null, normalizeOvhStatus(status), hlsStatus ?? null, assetsStatus ?? null,
+      now, now, lastSyncedAt ?? null, nextSyncAt ?? null, syncAttempts ?? 0, lastError ?? null,
+      iStart ?? null, iEnd ?? null, oStart ?? null, oEnd ?? null,
+      tracksJson, safeJsonStringify(subtitles), safeJsonStringify(thumbnails),
+      safeJsonStringify(hls), safeJsonStringify(raw)
+    );
+    return true;
+  } catch (e) {
+    console.warn("[cache] upsertOvhArchive error:", e.message);
+    return false;
+  }
+}
+
+export function getOvhArchive(animeId, episode, { publishedOnly = true } = {}) {
+  if (!db) return {};
+  try {
+    const rows = db.prepare(`
+      SELECT * FROM ovh_archive
+      WHERE anime_id = ? AND episode = ? ${publishedOnly ? "AND status = 'published'" : ""}
+    `).all(String(animeId), String(episode));
+    const out = {};
+    for (const row of rows) out[row.lang] = normalizeOvhArchiveRow(row);
+    return out;
+  } catch (e) {
+    console.warn("[cache] getOvhArchive error:", e.message);
+    return {};
+  }
+}
+
+export function getOvhArchiveBySlug(slug) {
+  if (!db || !slug) return null;
+  try {
+    return normalizeOvhArchiveRow(db.prepare(`SELECT * FROM ovh_archive WHERE slug = ?`).get(String(slug)));
+  } catch (e) {
+    console.warn("[cache] getOvhArchiveBySlug error:", e.message);
+    return null;
+  }
+}
+
+export function listAllOvhArchive() {
+  if (!db) return [];
+  try {
+    return db.prepare(`SELECT * FROM ovh_archive ORDER BY updated_at DESC`).all().map(normalizeOvhArchiveRow);
+  } catch (e) {
+    console.warn("[cache] listAllOvhArchive error:", e.message);
+    return [];
+  }
+}
+
+export function listDueOvhArchives({ now = Date.now(), limit = 5 } = {}) {
+  if (!db) return [];
+  try {
+    return db.prepare(`
+      SELECT * FROM ovh_archive
+      WHERE status != 'published' AND (next_sync_at IS NULL OR next_sync_at <= ?)
+      ORDER BY COALESCE(next_sync_at, 0), updated_at
+      LIMIT ?
+    `).all(now, limit).map(normalizeOvhArchiveRow);
+  } catch (e) {
+    console.warn("[cache] listDueOvhArchives error:", e.message);
+    return [];
+  }
+}
+
+export function deleteOvhArchive(animeId, episode, lang = "MULTI") {
+  if (!db) return 0;
+  try {
+    const result = db.prepare(`DELETE FROM ovh_archive WHERE anime_id = ? AND episode = ? AND lang = ?`)
+      .run(String(animeId), String(episode), String(lang).toUpperCase());
+    return result.changes ?? 0;
+  } catch (e) {
+    console.warn("[cache] deleteOvhArchive error:", e.message);
+    return 0;
   }
 }
 

@@ -2,8 +2,10 @@ import { Router } from "express";
 import crypto from "node:crypto";
 import fs from "fs";
 import { STREAM_TTL, REANIME_STREAM_TTL, isProviderEnabled, HEADERS } from "../config/constants.js";
-import { cacheGet, cacheSet, cacheDelete, timed, getR2Archive, getManualTracks, getEpisodeThumbnails, upsertEpisodeThumbnail } from "../lib/cache.js";
+import { cacheGet, cacheSet, cacheDelete, timed, getR2Archive, getOvhArchive, getManualTracks, getEpisodeThumbnails, upsertEpisodeThumbnail } from "../lib/cache.js";
 import { buildPublicR2Url, buildSignedR2Url } from "../lib/r2-seal.js";
+import { pickOvhThumbnailVtt, signOvhHlsUrl } from "../lib/ovh-hls.js";
+import { discoverOvhArchiveForEpisode } from "../lib/ovh-sync.js";
 import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { isR2Configured } from "../lib/hls-to-r2.js";
 import { archiveSubtitleTracksToR2, archiveThumbnailVttToR2 } from "../lib/reanime-r2.js";
@@ -301,6 +303,17 @@ function isDubLikeLang(lang) {
   return /DUB|LAT/.test(lang || "");
 }
 
+function coveredLangCodesFromAudioTrack(track) {
+  const out = new Set();
+  const code = String(track?.code || "").toUpperCase();
+  if (code) out.add(code);
+  const rawLang = String(track?.lang || track?.id || "").toLowerCase();
+  if ((track?.dub || code === "ENG-DUB") && (rawLang === "en" || rawLang === "en-us")) out.add("ENG-DUB");
+  if ((track?.dub || code === "ESP-LAT") && (rawLang === "es" || rawLang === "es-mx" || rawLang === "es-419")) out.add("ESP-LAT");
+  if ((track?.original || code === "JAP-SUB") && (rawLang === "ja" || rawLang === "ja-jp")) out.add("JAP-SUB");
+  return out;
+}
+
 function enqueueReanimeSidecarArchive({ anilistId, episode, reanime, reanimeCacheKey, respKey }) {
   if (!isR2Configured() || !reanime || reanimeSidecarInflight.has(reanimeCacheKey)) return;
 
@@ -412,12 +425,7 @@ function multiArchiveCoversLang(r2Archived, lang) {
   const tracks = r2Archived?.MULTI?.audioTracks;
   if (!Array.isArray(tracks) || !tracks.length) return false;
   return tracks.some((track) => {
-    const code = String(track?.code || "").toUpperCase();
-    const rawLang = String(track?.lang || track?.id || "").toLowerCase();
-    if (code === lang) return true;
-    if (lang === "ENG-DUB") return rawLang === "en" || rawLang === "en-us";
-    if (lang === "ESP-LAT") return rawLang === "es" || rawLang === "es-mx" || rawLang === "es-419";
-    return false;
+    return coveredLangCodesFromAudioTrack(track).has(lang);
   });
 }
 
@@ -500,7 +508,7 @@ async function buildMovieTvTracks(tmdbId, type, season, episode, proxyBase) {
   return normalizeSubtitleTracks(built || []);
 }
 
-async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime) {
+async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime, ovhArchived = {}) {
   const megaplayTracks = [];
   const seenMpUrls = new Set();
   for (const mp of [megaplayDub, megaplaySub]) {
@@ -564,7 +572,17 @@ async function buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, mega
     processedReanime = [...readyInR2, ...fallbackTracks];
   }
 
-  const rawTracks = [...crIndexedTracks, ...processedMegaplay, ...manualTracks, ...processedReanime];
+  const ovhTracks = Object.values(ovhArchived)
+    .filter((entry) => entry?.status === "published")
+    .flatMap((entry) => Array.isArray(entry.subtitles) ? entry.subtitles : [])
+    .filter((track) => track?.url)
+    .map((track) => ({
+      ...track,
+      storageProvider: "ovh",
+      provider: "zenkai",
+    }));
+
+  const rawTracks = [...crIndexedTracks, ...processedMegaplay, ...manualTracks, ...processedReanime, ...ovhTracks];
   return normalizeSubtitleTracks(rawTracks);
 }
 
@@ -979,10 +997,47 @@ const R2_LANG_LABELS = {
 // primero en el array para quedar como "CPT CDN 1" de su idioma: no dependen
 // de que el provider original siga vivo. verifyKey estable por slug — la URL
 // firmada rota (exp en la firma) y sin esto el verify cache nunca pegaría.
-function buildZenkaiStreams(r2Archived, episodeThumbnails = {}) {
+export function buildZenkaiStreams(r2Archived, episodeThumbnails = {}, ovhArchived = {}) {
   const out = [];
   const subThumbnailKey = episodeThumbnails.sub?.vttKey ?? episodeThumbnails.dub?.vttKey ?? null;
   const dubThumbnailKey = episodeThumbnails.dub?.vttKey ?? episodeThumbnails.sub?.vttKey ?? null;
+  const buildOptionalR2PublicUrl = (key) => {
+    if (!key) return null;
+    try { return buildPublicR2Url(key); }
+    catch { return null; }
+  };
+  for (const [lang, entry] of Object.entries(ovhArchived)) {
+    if (entry?.status !== "published") continue;
+    try {
+      const signedUrl = signOvhHlsUrl(entry.slug);
+      const isMulti = lang === "MULTI";
+      const ovhThumbnailUrl = pickOvhThumbnailVtt(entry.thumbnails);
+      const fallbackThumbnailKey = isMulti ? (subThumbnailKey || dubThumbnailKey) : (isDubLikeLang(lang) ? dubThumbnailKey : subThumbnailKey);
+      const thumbnailUrl = ovhThumbnailUrl || buildOptionalR2PublicUrl(fallbackThumbnailKey);
+      const skip = (entry.skipIntro || entry.skipOutro)
+        ? { ...(entry.skipIntro && { intro: entry.skipIntro }), ...(entry.skipOutro && { outro: entry.skipOutro }) }
+        : null;
+      out.push({
+        url: signedUrl,
+        quality: "auto",
+        lang,
+        langLabel: R2_LANG_LABELS[lang] || lang,
+        type: "hls",
+        provider: "zenkai",
+        originalProvider: "zenkai",
+        storageProvider: "ovh",
+        sourceProvider: entry.sourceProvider,
+        ...(isMulti && Array.isArray(entry.audioTracks) && entry.audioTracks.length && { multiAudio: true, audioTracks: entry.audioTracks }),
+        ...(isMulti && Array.isArray(entry.subtitleTracks) && entry.subtitleTracks.length && { subtitleTracks: entry.subtitleTracks }),
+        proxy_url: signedUrl,
+        verifyKey: `ovh:${entry.slug}`,
+        ...(skip && { skip }),
+        ...(thumbnailUrl && { thumbnailVtt: thumbnailUrl, thumbnailVttProxy: thumbnailUrl }),
+      });
+    } catch (e) {
+      console.warn(`[anime] ovh archive ${lang} sin firmar: ${e.message}`);
+    }
+  }
   for (const [lang, entry] of Object.entries(r2Archived)) {
     try {
       const signedUrl = buildSignedR2Url(`${entry.slug}/master.m3u8`);
@@ -1002,6 +1057,7 @@ function buildZenkaiStreams(r2Archived, episodeThumbnails = {}) {
         type: "hls",
         provider: "zenkai",
         originalProvider: "zenkai",
+        storageProvider: "r2",
         sourceProvider: entry.sourceProvider,
         ...(isMulti && { multiAudio: true }),
         ...(isMulti && Array.isArray(entry.audioTracks) && entry.audioTracks.length && { audioTracks: entry.audioTracks }),
@@ -1016,6 +1072,23 @@ function buildZenkaiStreams(r2Archived, episodeThumbnails = {}) {
     }
   }
   return out;
+}
+
+export function selectPreferredZenkaiStreams(streams) {
+  const out = [];
+  const zenkaiByLang = new Map();
+  for (const stream of streams) {
+    if (String(stream.originalProvider || "") !== "zenkai") {
+      out.push(stream);
+      continue;
+    }
+    const key = stream.lang || "unknown";
+    const current = zenkaiByLang.get(key);
+    if (!current || (current.storageProvider !== "ovh" && stream.storageProvider === "ovh")) {
+      zenkaiByLang.set(key, stream);
+    }
+  }
+  return [...zenkaiByLang.values(), ...out];
 }
 
 // Langs normalizados que cada provider puede producir (ver normalizeLang).
@@ -1060,35 +1133,45 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
   perf.lap("before r2 archive + thumbs");
   const r2Archived = getR2Archive(anilistId, episode);
+  let ovhArchived = getOvhArchive(anilistId, episode);
+  if (!Object.keys(ovhArchived).length) {
+    const discovery = await discoverOvhArchiveForEpisode(anilistId, episode);
+    if (discovery.status === "published") {
+      ovhArchived = getOvhArchive(anilistId, episode);
+      log.info(`[anime ${anilistId}/${episode}] ✅ ovh descubierto slug=${discovery.slug}`);
+    } else if (LOG_PROVIDER_DEBUG && !discovery.skipped) {
+      log.debug(`[anime:ovh ${anilistId}/${episode}] discovery ${discovery.status || "pending"} slug=${discovery.slug} error=${discovery.error || "-"}`);
+    }
+  }
   let episodeThumbnails = getEpisodeThumbnails(anilistId, episode);
-  perf.lap("r2Archived + episodeThumbnails from cache", { archivedLangs: Object.keys(r2Archived).length, hasThumbs: Boolean(episodeThumbnails) });
+  perf.lap("owned archives + episodeThumbnails from cache", { r2Langs: Object.keys(r2Archived).length, ovhLangs: Object.keys(ovhArchived).length, hasThumbs: Boolean(episodeThumbnails) });
   const coveredLangs = new Set();
   let zenkaiBuiltCount = 0;
   let zenkaiDroppedCount = 0;
   let zenkaiVerifyMs = 0;
-  if (Object.keys(r2Archived).length) {
-    const zenkaiStreams = buildZenkaiStreams(r2Archived, episodeThumbnails);
+  if (Object.keys(r2Archived).length || Object.keys(ovhArchived).length) {
+    const zenkaiStreams = buildZenkaiStreams(r2Archived, episodeThumbnails, ovhArchived);
     zenkaiBuiltCount = zenkaiStreams.length;
-    perf.lap("buildZenkaiStreams done", { count: zenkaiStreams.length, r2Keys: Object.keys(r2Archived) });
-    if (LOG_PROVIDER_DEBUG) log.debug(`[anime:zenkai ${anilistId}/${episode}] r2=${Object.keys(r2Archived).join(",") || "-"} built=${zenkaiStreams.map(s=>s.lang).join(",") || "-"}`);
+    perf.lap("buildZenkaiStreams done", { count: zenkaiStreams.length, r2Keys: Object.keys(r2Archived), ovhKeys: Object.keys(ovhArchived) });
+    if (LOG_PROVIDER_DEBUG) log.debug(`[anime:zenkai ${anilistId}/${episode}] ovh=${Object.keys(ovhArchived).join(",") || "-"} r2=${Object.keys(r2Archived).join(",") || "-"} built=${zenkaiStreams.map(s=>`${s.storageProvider || "?"}:${s.lang}`).join(",") || "-"}`);
     if (zenkaiStreams.length) {
       const verifyStart = Date.now();
-      const ok = await filterPlayableStreams(zenkaiStreams, { allowEmpty: true });
+      const ok = selectPreferredZenkaiStreams(await filterPlayableStreams(zenkaiStreams, { allowEmpty: true }));
       zenkaiVerifyMs = Date.now() - verifyStart;
       zenkaiDroppedCount = zenkaiStreams.length - ok.length;
       for (const s of ok) {
         coveredLangs.add(s.lang);
         if (s.lang === "MULTI" && Array.isArray(s.audioTracks)) {
           for (const track of s.audioTracks) {
-            if (track?.code) coveredLangs.add(String(track.code).toUpperCase());
+            for (const langCode of coveredLangCodesFromAudioTrack(track)) coveredLangs.add(langCode);
           }
         }
       }
     } else {
-      log.warn(`[anime ${anilistId}/${episode}] ⚠️ zenkai archivado pero sin URLs firmadas (falta R2_SEAL_SECRET/R2_WORKER_BASE)`);
+      log.warn(`[anime ${anilistId}/${episode}] ⚠️ zenkai archivado pero sin URLs firmadas (revisar R2/OVH env)`);
     }
   }
-  perf.lap("r2 coverage ready", { archivedLangs: Object.keys(r2Archived).length, coveredLangs: coveredLangs.size });
+  perf.lap("owned coverage ready", { r2Langs: Object.keys(r2Archived).length, ovhLangs: Object.keys(ovhArchived).length, coveredLangs: coveredLangs.size });
   const animeav1DownloadsCached = cacheGet(animeav1DownloadsCacheKey(anilistId, episode));
   const skipProviders = new Set(
     Object.entries(PROVIDER_LANGS)
@@ -1097,7 +1180,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       .filter(([, langs]) => langs.every((l) => coveredLangs.has(l)))
       .map(([name]) => name)
   );
-  log.info(`[anime ${anilistId}/${episode}] ${zenkaiDroppedCount ? "⚠️" : "✅"} zenkai streams=${zenkaiBuiltCount} r2=${Object.keys(r2Archived).join(",") || "-"} covered=${coveredLangs.size ? [...coveredLangs].join(",") : "-"} skip=${skipProviders.size ? [...skipProviders].join(",") : "-"} verify=${zenkaiVerifyMs}ms dropped=${zenkaiDroppedCount}`);
+  log.info(`[anime ${anilistId}/${episode}] ${zenkaiDroppedCount ? "⚠️" : "✅"} zenkai streams=${zenkaiBuiltCount} ovh=${Object.keys(ovhArchived).join(",") || "-"} r2=${Object.keys(r2Archived).join(",") || "-"} covered=${coveredLangs.size ? [...coveredLangs].join(",") : "-"} skip=${skipProviders.size ? [...skipProviders].join(",") : "-"} verify=${zenkaiVerifyMs}ms dropped=${zenkaiDroppedCount}`);
   perf.lap("skipProviders computed", { skipSize: skipProviders.size });
 
   perf.lap("before cacheGet providers");
@@ -1175,7 +1258,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
     const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, miruro, anikoto, aniwaves, animeheaven, aniskip, reanime } = data;
     perf.lap("about to start buildAnimeTracks (in parallel with stream build)");
-    const tracksPromise = buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
+    const tracksPromise = buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime, ovhArchived);
     const reanimeIsSidecarOnly = skipProviders.has("reanime");
     const reanimeArchiveCacheKey = reanimeIsSidecarOnly ? reanimeSubsCacheKey : reanimeCacheKey;
     if (reanimeData && !reanimeIsSidecarOnly) cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
@@ -1184,7 +1267,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
     let streams = [];
 
-    streams.push(...buildZenkaiStreams(r2Archived, episodeThumbnails));
+    streams.push(...buildZenkaiStreams(r2Archived, episodeThumbnails, ovhArchived));
     perf.lap("buildZenkaiStreams push done", { count: streams.length });
 
     const downloads = [];
@@ -1421,7 +1504,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     ];
     const playable = await filterPlayableStreams(grouped);
     perf.lap("filterPlayableStreams done", { inCount: grouped.length, outCount: playable.length });
-    const withDisplay = assignDisplayProviders(playable);
+    const preferredPlayable = selectPreferredZenkaiStreams(playable);
+    const withDisplay = assignDisplayProviders(preferredPlayable);
     perf.lap("assignDisplayProviders done", { count: withDisplay.length });
     const tracks = await tracksPromise;
     perf.lap("buildAnimeTracks done", { trackCount: tracks?.length ?? 0 });

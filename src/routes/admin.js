@@ -6,9 +6,11 @@ import {
   listPersistedKeys, cacheDelete, cacheFlushAll,
   cacheDeleteAnimeResponseCache,
   listAllR2Archive, upsertR2Archive, deleteR2Archive,
+  listAllOvhArchive, getOvhArchiveBySlug, deleteOvhArchive,
   upsertEpisodeThumbnail,
   listAllManualTracks, addManualTrack, deleteManualTrack,
 } from "../lib/cache.js";
+import { registerAndMaybeSyncOvhArchive, syncOvhArchive } from "../lib/ovh-sync.js";
 import { verifyAnimeCache } from "../lib/stream-verifier.js";
 import { API_KEY } from "../config/constants.js";
 
@@ -121,10 +123,18 @@ function normalizeArchiveTracks({ tracks, audioTracks, subtitleTracks }) {
   return normalized;
 }
 
+function validateSkipRange(name, range) {
+  if (range == null) return null;
+  if (!Array.isArray(range) || range.length !== 2 || range.some(v => typeof v !== "number" || !isFinite(v) || v < 0)) {
+    return `${name} inválido: se esperaba [start, end] en segundos`;
+  }
+  return null;
+}
+
 // Listado completo: lo que ya está archivado + tracks manuales, para que el
 // panel pueda mostrar todo y avisar antes de sobreescribir.
 router.get("/admin/api/r2-archive", requireApiKey, (req, res) => {
-  res.json({ archives: listAllR2Archive(), manualTracks: listAllManualTracks() });
+  res.json({ archives: listAllR2Archive(), ovhArchives: listAllOvhArchive(), manualTracks: listAllManualTracks() });
 });
 
 // Registra un episodio ya subido a R2 por el panel.
@@ -152,10 +162,8 @@ router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, 
       return res.status(400).json({ error: `slug inválido: se esperaba "${expectedSlug}"` });
     }
     for (const [name, range] of [["skipIntro", skipIntro], ["skipOutro", skipOutro]]) {
-      if (range == null) continue;
-      if (!Array.isArray(range) || range.length !== 2 || range.some(v => typeof v !== "number" || !isFinite(v) || v < 0)) {
-        return res.status(400).json({ error: `${name} inválido: se esperaba [start, end] en segundos` });
-      }
+      const error = validateSkipRange(name, range);
+      if (error) return res.status(400).json({ error });
     }
     let archiveTracks = null;
     try {
@@ -206,6 +214,112 @@ router.post("/admin/api/register-archive", requireApiKey, express.json(), (req, 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+router.post("/admin/api/register-ovh-archive", requireApiKey, express.json(), async (req, res) => {
+  try {
+    const {
+      animeId,
+      episode,
+      lang = "MULTI",
+      slug,
+      bytes,
+      sourceProvider,
+      subs: _subs,
+      skipIntro,
+      skipOutro,
+      tracks,
+      audioTracks,
+      subtitleTracks,
+      hlsStatus,
+      assetsStatus,
+      storageProvider,
+      storageProviders,
+    } = req.body || {};
+
+    if (!animeId || !episode || !slug) {
+      return res.status(400).json({ error: "Faltan campos: animeId, episode, slug" });
+    }
+    const normalizedLang = String(lang || "MULTI").toUpperCase();
+    if (normalizedLang !== "MULTI") {
+      return res.status(400).json({ error: "OVH solo acepta lang MULTI" });
+    }
+    if (storageProvider && String(storageProvider).toLowerCase() !== "ovh") {
+      return res.status(400).json({ error: "storageProvider inválido: se esperaba ovh" });
+    }
+    if (Array.isArray(storageProviders) && storageProviders.length && !storageProviders.map(String).map(s => s.toLowerCase()).includes("ovh")) {
+      return res.status(400).json({ error: "storageProviders debe incluir ovh" });
+    }
+    const expectedSlug = `${animeId}-${episode}-multi`;
+    if (String(slug) !== expectedSlug) {
+      return res.status(400).json({ error: `slug inválido: se esperaba "${expectedSlug}"` });
+    }
+    for (const [name, range] of [["skipIntro", skipIntro], ["skipOutro", skipOutro]]) {
+      const error = validateSkipRange(name, range);
+      if (error) return res.status(400).json({ error });
+    }
+
+    let archiveTracks = null;
+    try {
+      archiveTracks = normalizeArchiveTracks({ tracks, audioTracks, subtitleTracks });
+    } catch (e) {
+      return res.status(400).json({ error: e.message });
+    }
+
+    const record = {
+      animeId,
+      episode,
+      lang: normalizedLang,
+      slug: String(slug),
+      sourceProvider: sourceProvider || "crunchyroll-downloader",
+      bytes: bytes ?? null,
+      hlsStatus: hlsStatus || "pending",
+      assetsStatus: assetsStatus || "pending",
+      skipIntro: skipIntro ?? null,
+      skipOutro: skipOutro ?? null,
+      tracks: archiveTracks,
+      raw: {
+        registration: {
+          storageProvider: storageProvider || "ovh",
+          storageProviders: Array.isArray(storageProviders) ? storageProviders : ["ovh"],
+          hlsStatus: hlsStatus || "pending",
+          assetsStatus: assetsStatus || "pending",
+          subs: Array.isArray(_subs) ? _subs : [],
+        },
+      },
+    };
+
+    const syncResult = await registerAndMaybeSyncOvhArchive(record);
+    const current = getOvhArchiveBySlug(slug);
+    const responseCacheCleared = cacheDeleteAnimeResponseCache(animeId, episode);
+    const status = current?.status || syncResult.status || "pending";
+    console.log(`[admin] register-ovh-archive ${animeId} ep${episode} ${normalizedLang} → ${slug} (${status})`);
+    res.status(status === "published" ? 200 : 202).json({
+      ok: true,
+      slug,
+      status,
+      storageProvider: "ovh",
+      audioTracksRegistered: archiveTracks?.audioTracks?.length ?? 0,
+      subtitleTracksRegistered: archiveTracks?.subtitleTracks?.length ?? 0,
+      responseCacheCleared,
+      nextSyncAt: current?.nextSyncAt ?? syncResult.nextSyncAt ?? null,
+      syncAttempts: current?.syncAttempts ?? 0,
+      lastError: current?.lastError ?? syncResult.error ?? null,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+router.post("/admin/api/sync-ovh-archive/:slug", requireApiKey, async (req, res) => {
+  try {
+    const result = await syncOvhArchive(req.params.slug, { retries: 1 });
+    const current = getOvhArchiveBySlug(req.params.slug);
+    if (current) cacheDeleteAnimeResponseCache(current.animeId, current.episode);
+    res.status(result.status === "missing" ? 404 : 200).json({ ok: result.status !== "missing", ...result, current });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
 // Registra SOLO subtítulos manuales para un episodio, sin tocar r2_archive.
 // Usado cuando el panel sube un sub suelto (no necesita re-subir el m3u8).
 // Body: { animeId, episode, subs: [{ file, label, lang, kind? }] }
@@ -232,6 +346,14 @@ router.delete("/admin/api/r2-archive/:animeId/:episode/:lang", requireApiKey, (r
   try {
     deleteR2Archive(req.params.animeId, req.params.episode, req.params.lang);
     res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.delete("/admin/api/ovh-archive/:animeId/:episode/:lang?", requireApiKey, (req, res) => {
+  try {
+    const deleted = deleteOvhArchive(req.params.animeId, req.params.episode, req.params.lang || "MULTI");
+    const responseCacheCleared = cacheDeleteAnimeResponseCache(req.params.animeId, req.params.episode);
+    res.json({ ok: true, deleted, responseCacheCleared });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
