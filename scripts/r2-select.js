@@ -3,7 +3,7 @@
  * agrupa los streams por idioma, elige 1 URL por grupo según prioridad de
  * provider, y archiva cada uno a R2 con archiveHlsToR2().
  *
- * Cubre ESP-LAT, ENG-DUB, JAP-ES-HS y JAP-EN-HS. JAP-SUB queda afuera por
+ * Cubre ESP-LAT, ENG-DUB y JAP-ES-HS. JAP-SUB/JAP-EN-HS quedan afuera por
  * ahora (soft-subs, menos prioritario).
  *
  * Uso:
@@ -34,7 +34,6 @@ const GROUP_PRIORITY = {
   "ESP-LAT": ["animeav1", "cuevana"],
   "ENG-DUB": ["reanime", "megaplay", "miruro", "anikoto"],
   "JAP-ES-HS": ["animeav1"],
-  "JAP-EN-HS": ["anikoto-hsub", "miruro"],
 };
 
 function pickBest(streams, priorityList) {
