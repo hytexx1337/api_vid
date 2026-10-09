@@ -1077,9 +1077,21 @@ export function buildZenkaiStreams(r2Archived, episodeThumbnails = {}, ovhArchiv
 export function selectPreferredZenkaiStreams(streams) {
   const out = [];
   const zenkaiByLang = new Map();
+  const ovhMultiCoveredLangs = new Set();
+  for (const stream of streams) {
+    if (String(stream.originalProvider || "") !== "zenkai") continue;
+    if (stream.storageProvider !== "ovh" || stream.lang !== "MULTI") continue;
+    if (!Array.isArray(stream.audioTracks)) continue;
+    for (const track of stream.audioTracks) {
+      for (const langCode of coveredLangCodesFromAudioTrack(track)) ovhMultiCoveredLangs.add(langCode);
+    }
+  }
   for (const stream of streams) {
     if (String(stream.originalProvider || "") !== "zenkai") {
       out.push(stream);
+      continue;
+    }
+    if (stream.storageProvider !== "ovh" && ovhMultiCoveredLangs.has(stream.lang)) {
       continue;
     }
     const key = stream.lang || "unknown";

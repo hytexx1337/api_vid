@@ -241,6 +241,7 @@ function providerPreferenceRank(originalProvider) {
  * finalmente JAP-SUB y otros.
  */
 const LANG_PREFERENCE_RANK = [
+  { re: /^MULTI$/i, rank: 0, label: "multi audio" },
   { re: /^ENG(-|_)DUB$/i, rank: 1, label: "inglés doblado" },
   { re: /^JAP(-|_)EN(-|_)HS$/i, rank: 2, label: "japonés hard-sub inglés" },
   { re: /^EN(-|_)HS$/i, rank: 2, label: "japonés hard-sub inglés alias" },

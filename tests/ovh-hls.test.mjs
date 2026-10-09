@@ -220,18 +220,28 @@ test("discovery OVH consulta y persiste un episodio publicado que no estaba en S
 });
 
 test("streams Zenkai priorizan OVH sobre R2 sin borrar externos", () => {
+  const fullAudioTracks = [
+    ...audioTracks,
+    { id: "es-MX", lang: "es-MX", code: "ESP-LAT", label: "Latino", dub: true },
+  ];
   const ovhStreams = buildZenkaiStreams(
-    { MULTI: { slug: "112641-8-multi", sourceProvider: "r2", audioTracks } },
+    {
+      MULTI: { slug: "112641-8-multi", sourceProvider: "r2", audioTracks: fullAudioTracks },
+      "ENG-DUB": { slug: "112641-8-eng-dub", sourceProvider: "r2" },
+      "ESP-LAT": { slug: "112641-8-esp-lat", sourceProvider: "r2" },
+    },
     {},
-    { MULTI: { status: "published", slug: "112641-8-multi", sourceProvider: "crunchyroll-downloader", audioTracks } }
+    { MULTI: { status: "published", slug: "112641-8-multi", sourceProvider: "crunchyroll-downloader", audioTracks: fullAudioTracks } }
   );
-  assert.equal(ovhStreams.length, 2);
+  assert.equal(ovhStreams.length, 4);
   const selected = selectPreferredZenkaiStreams([
     ...ovhStreams,
     { url: "https://example.test/ext.m3u8", proxy_url: "https://example.test/ext.m3u8", lang: "ESP-LAT", originalProvider: "animeav1", provider: "animeav1", type: "hls" },
   ]);
   assert.equal(selected.filter((s) => s.originalProvider === "zenkai").length, 1);
   assert.equal(selected.find((s) => s.originalProvider === "zenkai").storageProvider, "ovh");
+  assert.equal(selected.some((s) => s.storageProvider === "r2" && s.lang === "ENG-DUB"), false);
+  assert.equal(selected.some((s) => s.storageProvider === "r2" && s.lang === "ESP-LAT"), false);
   assert.equal(selected.some((s) => s.originalProvider === "animeav1"), true);
   assert.equal(selected.find((s) => s.storageProvider === "ovh").verifyKey, "ovh:112641-8-multi");
 });
