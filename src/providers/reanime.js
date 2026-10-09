@@ -1,6 +1,7 @@
-import { extractFlixcloud } from "../extractors/flixcloud.js";
+import { extractFlixcloud, extractFlixcloudSidecar } from "../extractors/flixcloud.js";
 import { cacheGet, cacheSet } from "../lib/cache.js";
 import { curlWorkerFetch } from "../lib/http.js";
+import { LOG_PROVIDER_DEBUG, log, shortUrl } from "../lib/logger.js";
 import { ANILIST_HEADERS, PROVIDER_TTL, REANIME_CF_WORKER } from "../config/constants.js";
 
 const BASE = "https://reanime.to";
@@ -35,7 +36,7 @@ function makeWorkerFetchImpl(timeoutMs = 15000) {
 async function fetchAnilistMedia(anilistId) {
   const cacheKey = `reanime:al-media:${anilistId}`;
   const cached = cacheGet(cacheKey);
-  if (cached) { console.log(`  [reanime:resolveSeries ${anilistId}] fetchAnilistMedia cache hit`); return cached; }
+  if (cached) { if (LOG_PROVIDER_DEBUG) log.debug(`[reanime:resolveSeries ${anilistId}] fetchAnilistMedia cache hit`); return cached; }
   const t1 = Date.now();
   const query = `query($id:Int){Media(id:$id,type:ANIME){id idMal title{english romaji native} synonyms}}`;
   const res = await fetch("https://graphql.anilist.co", {
@@ -48,7 +49,7 @@ async function fetchAnilistMedia(anilistId) {
   const json = await res.json();
   const media = json?.data?.Media;
   if (!media) throw new Error(`AniList: no media for ${anilistId}`);
-  console.log(`  [reanime:resolveSeries ${anilistId}] fetchAnilistMedia graphql: +${Date.now()-t1}ms`);
+  if (LOG_PROVIDER_DEBUG) log.debug(`[reanime:resolveSeries ${anilistId}] fetchAnilistMedia graphql: +${Date.now()-t1}ms`);
   cacheSet(cacheKey, media, PROVIDER_TTL);
   return media;
 }
@@ -61,7 +62,7 @@ async function searchReanime(query) {
   const t1 = Date.now();
   const data = await reanimeFetch(`${BASE}/api/v1/search?${new URLSearchParams({ q: query, limit: 10 })}`, { timeoutMs: 15000, responseType: "json" });
   const results = Array.isArray(data?.results) ? data.results : [];
-  console.log(`  [reanime:resolveSeries] search query="${query.slice(0,35)}" → +${Date.now()-t1}ms (${results.length} results)`);
+  if (LOG_PROVIDER_DEBUG) log.debug(`[reanime:resolveSeries] search query="${query.slice(0,35)}" +${Date.now()-t1}ms (${results.length} results)`);
   return results;
 }
 
@@ -86,9 +87,9 @@ function extractAnilistIdFromCover(coverImage) {
 async function resolveSeries(anilistId) {
   const cacheKey = `reanime:series:${anilistId}`;
   const cached = cacheGet(cacheKey);
-  if (cached) { console.log(`  [reanime:resolveSeries ${anilistId}] cache hit series=${cached.animeId}`); return cached; }
+  if (cached) { if (LOG_PROVIDER_DEBUG) log.debug(`[reanime:resolveSeries ${anilistId}] cache hit series=${cached.animeId}`); return cached; }
   const t0 = Date.now();
-  const sl = (s) => console.log(`  [reanime:resolveSeries ${anilistId}] ${s}: +${Date.now()-t0}ms`);
+  const sl = (s) => { if (LOG_PROVIDER_DEBUG) log.debug(`[reanime:resolveSeries ${anilistId}] ${s}: +${Date.now()-t0}ms`); };
   sl("start cache miss");
 
   const media = await fetchAnilistMedia(anilistId);
@@ -203,10 +204,105 @@ async function resolveSeries(anilistId) {
 
 const SERVER_PRIORITY = { "HD-2": 0, "HD-1": 1 };
 const sortByPriority = (arr) => arr.slice().sort((a, b) => (SERVER_PRIORITY[a.serverName] ?? 9) - (SERVER_PRIORITY[b.serverName] ?? 9));
+const SUB_TYPES = ["sub", "s-sub"];
+const DUB_TYPES = ["dub", "s-dub"];
+
+export async function getReanimeSubtitleSidecar(anilistId, episode) {
+  const t0 = Date.now();
+  const rlap = (s) => { if (LOG_PROVIDER_DEBUG) log.debug(`[reanime:subs ${anilistId}/${episode}] ${s}: +${Date.now()-t0}ms`); };
+  const ep = parseInt(episode);
+  const cacheKey = `reanime:subs-sidecar:v1:${anilistId}:${ep}`;
+  const cached = cacheGet(cacheKey);
+  if (cached) {
+    rlap(`cache hit sub=${Boolean(cached?.sub)} dub=${Boolean(cached?.dub)}`);
+    return cached;
+  }
+
+  try {
+    rlap("start /api/flix only");
+    const flixData = await reanimeFetch(`${BASE}/api/flix/${anilistId}/${ep}`, { timeoutMs: 15000, responseType: "json" });
+    const links = flixData?.success && Array.isArray(flixData?.servers) ? flixData.servers : [];
+    const subServers = sortByPriority(links.filter((s) => SUB_TYPES.includes(s.dataType)));
+    const dubServers = sortByPriority(links.filter((s) => DUB_TYPES.includes(s.dataType)));
+    const allServersDedup = new Map();
+    for (const s of subServers) allServersDedup.set(s.dataLink, s);
+    for (const s of dubServers) if (!allServersDedup.has(s.dataLink)) allServersDedup.set(s.dataLink, s);
+    const serverList = [...allServersDedup];
+    rlap(`servers sub=${subServers.length} dub=${dubServers.length} uniqueEmbeds=${serverList.length}`);
+    if (!serverList.length) return { sub: null, dub: null };
+
+    const sidecarByDataLink = new Map();
+    async function processEmbed(dataLink, server, tag = "") {
+      const tembed = Date.now();
+      log.trace(`[reanime:subs ${anilistId}/${episode}] embed${tag ? ` ${tag}` : ""} ${server.serverName} -> ${shortUrl(dataLink)}`);
+      const embedHtml = await reanimeFetch(dataLink, { timeoutMs: 15000, responseType: "text" });
+      const sidecar = extractFlixcloudSidecar(embedHtml);
+      const entry = {
+        server: server.serverName,
+        url: null,
+        downloadLink: dataLink.replace("/e/", "/d/"),
+        subtitles: sidecar.subtitles ?? [],
+        available_fonts: sidecar.available_fonts ?? {},
+        extracted_fonts: sidecar.extracted_fonts ?? [],
+        thumbnails_vtt: sidecar.thumbnails_vtt ?? null,
+        intro: sidecar.intro_chapter ?? null,
+        outro: sidecar.outro_chapter ?? null,
+      };
+      sidecarByDataLink.set(dataLink, entry);
+      rlap(`[embed${tag ? ` ${tag}` : ""}] sidecar OK: +${Date.now()-tembed}ms subs=${entry.subtitles.length} fonts=${Object.keys(entry.available_fonts).length} vtt=${Boolean(entry.thumbnails_vtt)}`);
+      return { dataLink, server, entry };
+    }
+
+    let winnerResolved = false;
+    const winnerLock = Promise.withResolvers();
+    const racers = serverList.map(async ([dataLink, server], i) => {
+      try {
+        const result = await processEmbed(dataLink, server, `RACE ${i+1}/${serverList.length}`);
+        if (!winnerResolved && result.entry.subtitles.length) {
+          winnerResolved = true;
+          winnerLock.resolve(result);
+        }
+        return { ok: true, ...result };
+      } catch (error) {
+        rlap(`[embed RACE ${i+1}/${serverList.length}] FAIL ${server.serverName}: ${error.message}`);
+        return { ok: false, dataLink, server, error };
+      }
+    });
+    const anyResolvedOkOrAllRejected = (async () => {
+      const results = await Promise.allSettled(racers);
+      const ok = results.find((r) => r.status === "fulfilled" && r.value?.ok && r.value?.entry?.subtitles?.length);
+      if (ok) return ok.value;
+      throw new Error("todos los embeds fallaron o vinieron sin subtítulos");
+    })();
+
+    try {
+      await Promise.race([winnerLock.promise, anyResolvedOkOrAllRejected]);
+    } catch {
+      // Si todos fallan, dejamos que pickBest devuelva nulls.
+    }
+
+    function pickBest(servers) {
+      for (const s of servers) {
+        const val = sidecarByDataLink.get(s.dataLink);
+        if (val?.subtitles?.length) return val;
+      }
+      return null;
+    }
+
+    const sidecar = { sub: pickBest(subServers), dub: pickBest(dubServers) };
+    if (sidecar.sub || sidecar.dub) cacheSet(cacheKey, sidecar, PROVIDER_TTL);
+    const uniqueSubs = new Set([...(sidecar.sub?.subtitles ?? []), ...(sidecar.dub?.subtitles ?? [])].map((s) => s?.url || s?.file).filter(Boolean));
+    log.info(`[reanime-subs ${anilistId}/${episode}] ${sidecar.sub || sidecar.dub ? "✅ ok" : "⚠️ empty"} tracks=${uniqueSubs.size} fonts=${Object.keys(sidecar.sub?.available_fonts ?? sidecar.dub?.available_fonts ?? {}).length} ${Date.now()-t0}ms`);
+    return sidecar;
+  } catch (error) {
+    log.warn(`[reanime-subs ${anilistId}/${episode}] ❌ fail ${Date.now()-t0}ms: ${error.message}`);
+    return { sub: null, dub: null };
+  }
+}
 
 async function resolveReanimeStream(anilistId, audio, ep) {
   const t0 = Date.now();
-  const sl = (s) => console.log(`  [reanime:stream ${anilistId}/${ep} ${audio}] ${s}: +${Date.now()-t0}ms`);
+  const sl = (s) => { if (LOG_PROVIDER_DEBUG) log.debug(`[reanime:stream ${anilistId}/${ep} ${audio}] ${s}: +${Date.now()-t0}ms`); };
   sl("start");
   const series = await resolveSeries(anilistId);
   sl(`resolved series slug=${series.animeId}`);
@@ -237,7 +333,7 @@ async function resolveReanimeStream(anilistId, audio, ep) {
     const server = servers[i];
     try {
       const tembed = Date.now();
-      sl(`[${i+1}/${servers.length}] fetch embed ${server.serverName} → ${server.dataLink.slice(0,70)}`);
+      log.trace(`[reanime:stream ${anilistId}/${ep} ${audio}] fetch embed ${server.serverName} -> ${shortUrl(server.dataLink)}`);
       const embedHtml = await reanimeFetch(server.dataLink, { timeoutMs: 15000, responseType: "text" });
       sl(`[${i+1}/${servers.length}] embed html: +${Date.now()-tembed}ms size=${embedHtml?.length??0}B`);
       const textract = Date.now();
@@ -281,7 +377,7 @@ async function resolveReanimeStream(anilistId, audio, ep) {
 // para no enviar N requests paralelas a la MISMA URL embed de flixcloud (que throttla >7s).
 export async function getReanimeStreams(anilistId, episode) {
   const t0 = Date.now();
-  const rlap = (s) => console.log(`  [reanime:getStreams ${anilistId}/${episode}] ${s}: +${Date.now()-t0}ms`);
+  const rlap = (s) => { if (LOG_PROVIDER_DEBUG) log.debug(`[reanime:getStreams ${anilistId}/${episode}] ${s}: +${Date.now()-t0}ms`); };
   rlap("start");
   const ep = parseInt(episode);
 

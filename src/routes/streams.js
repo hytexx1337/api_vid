@@ -8,6 +8,7 @@ import { enqueueArchiveJob, isQueuedOrArchiving } from "../lib/r2-queue.js";
 import { isR2Configured } from "../lib/hls-to-r2.js";
 import { archiveSubtitleTracksToR2, archiveThumbnailVttToR2 } from "../lib/reanime-r2.js";
 import { getProxyBase } from "../lib/proxy.js";
+import { LOG_PERF_VERBOSE, LOG_PROVIDER_DEBUG, log } from "../lib/logger.js";
 import { buildTracks, readCrIndex, readVdrkIndex, writeVdrkIndex, vdrkKey, getVidrkSubsWithIndex, normalizeSubLabel, detectTrackLang, normalizeSubtitleTracks } from "../lib/subtitles.js";
 import { sealProxyUrls, sealedQueryParam, sealedQueryParamDeterministic, sealQueryPayload, maskRawUrl, unmaskRawUrl } from "../lib/proxy-seal.js";
 import { filterPlayableStreams, prewarmVerify } from "../lib/stream-verify.js";
@@ -43,6 +44,7 @@ import {
   getVidstuckStream,
   getVixsrcStream,
   getReanimeStreams,
+  getReanimeSubtitleSidecar,
   getAniwavesStreams,
   getAnimeheavenStreams,
 } from "../providers/index.js";
@@ -195,6 +197,20 @@ function handleError(res, err) {
   res.status(status).json({ error: err.message });
 }
 
+function animeav1DownloadsCacheKey(anilistId, episode) {
+  return `anime-downloads:animeav1:v1:${anilistId}:${episode}`;
+}
+
+function countAnimeav1Downloads(downloads) {
+  return (downloads?.dub?.length ?? 0) + (downloads?.sub?.length ?? 0);
+}
+
+function cacheAnimeav1Downloads(anilistId, episode, latino) {
+  const count = countAnimeav1Downloads(latino?.downloads);
+  if (!count) return;
+  cacheSet(animeav1DownloadsCacheKey(anilistId, episode), { downloads: latino.downloads, count }, STREAM_TTL);
+}
+
 function createAnimePerfLogger(anilistId, episode) {
   const start = Date.now();
   let last = start;
@@ -203,7 +219,7 @@ function createAnimePerfLogger(anilistId, episode) {
     lap(label, extra = null) {
       const now = Date.now();
       const suffix = extra ? ` ${JSON.stringify(extra)}` : "";
-      console.log(`[anime:perf ${anilistId}/${episode}] ${label}: +${now - last}ms total=${now - start}ms${suffix}`);
+      if (LOG_PERF_VERBOSE) log.debug(`[anime:perf ${anilistId}/${episode}] ${label}: +${now - last}ms total=${now - start}ms${suffix}`);
       last = now;
     },
   };
@@ -233,7 +249,6 @@ function collectReanimeSubtitleTracks(reanime) {
               extracted_fonts: item.extracted_fonts ?? [],
             }
           : {}),
-        ...(s.default && { default: true }),
       });
     }
   }
@@ -698,7 +713,7 @@ router.get("/tv/:tmdbId/:season/:episode", async (req, res) => {
 // ── Anime endpoint ─────────────────────────────────────────────────────────────
 async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), opts = {}) {
   const t0 = Date.now();
-  const lap = (label) => console.log(`  [resolveAnime ${anilistId}/${episode}] ${label}: ${Date.now() - t0}ms`);
+  const lap = (label) => { if (LOG_PERF_VERBOSE) log.debug(`[resolveAnime ${anilistId}/${episode}] ${label}: ${Date.now() - t0}ms`); };
   // #region debug-point B:resolve-start
   reportAnimeRouteDebug("B", "src/routes/streams.js:resolveAnimeData:start", "[DEBUG] resolveAnimeData start", { anilistId, episode, skipProviders: [...skipProviders] });
   // #endregion
@@ -709,14 +724,14 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), o
     const elapsed = Date.now() - globalStartTs;
     const remain = globalBudgetMs - elapsed;
     budgetMs = Math.max(500, remain);
-    console.log(`  [resolveAnime] global budget: total=${globalBudgetMs}ms elapsed=${elapsed}ms → effective resolve budget=${budgetMs}ms`);
+    if (LOG_PERF_VERBOSE) log.debug(`[resolveAnime ${anilistId}/${episode}] budget total=${globalBudgetMs}ms elapsed=${elapsed}ms effective=${budgetMs}ms`);
   }
 
   const timed2 = (name, promise) => {
     const ts = Date.now();
     return promise.then(
-      v => { console.log(`  [resolveAnime] ${name} OK: ${Date.now() - ts}ms`); return v; },
-      e => { console.warn(`  [resolveAnime] ${name} ✗ (${Date.now() - ts}ms):`, e.message); throw e; }
+      v => { if (LOG_PROVIDER_DEBUG) log.debug(`[resolveAnime ${anilistId}/${episode}] ${name} ok ${Date.now() - ts}ms`); return v; },
+      e => { log.warn(`[resolveAnime ${anilistId}/${episode}] ${name} fail ${Date.now() - ts}ms: ${e.message}`); throw e; }
     );
   };
 
@@ -734,18 +749,25 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), o
   const skip = (name) => skipProviders.has(name);
 
   const providerDefs = [
-    ["animeav1",    () => skip("animeav1") ? Promise.resolve(null) : timed2("animeav1", withTimeout("animeav1", SCRAPER_TIMEOUT_MED, getLatinoStream(anilistId, episode).then(v => {
-      for (const s of v?.streams ?? []) {
-        const isMp4u = s.provider === "mp4upload";
-        pw({
-          url: s.cfUrl ?? s.url,
-          headers: isMp4u ? { Referer: "https://mp4upload.com/" } : undefined,
-          type: isMp4u ? "mp4" : "hls",
-          originalProvider: s.provider ?? "animeav1",
-        });
+    ["animeav1",    () => {
+      if (skip("animeav1")) {
+        const cached = cacheGet(animeav1DownloadsCacheKey(anilistId, episode));
+        return Promise.resolve(cached?.downloads ? { streams: [], downloads: cached.downloads, _downloadsCacheHit: true } : null);
       }
-      return v;
-    })))],
+      return timed2("animeav1", withTimeout("animeav1", SCRAPER_TIMEOUT_MED, getLatinoStream(anilistId, episode).then(v => {
+        for (const s of v?.streams ?? []) {
+          const isMp4u = s.provider === "mp4upload";
+          pw({
+            url: s.cfUrl ?? s.url,
+            headers: isMp4u ? { Referer: "https://mp4upload.com/" } : undefined,
+            type: isMp4u ? "mp4" : "hls",
+            originalProvider: s.provider ?? "animeav1",
+          });
+        }
+        cacheAnimeav1Downloads(anilistId, episode, v);
+        return v;
+      })));
+    }],
     ["megaplay",    () => skip("megaplay") ? Promise.resolve({ dub: null, sub: null }) : timed2("megaplay", withTimeout("megaplay", SCRAPER_TIMEOUT_FAST, getMegaplayStreams(anilistId, parseInt(episode)).then(v => {
       for (const it of [v?.dub, v?.sub]) if (it?.url) pw({ url: it.url, headers: it.headers, type: "hls", originalProvider: "megaplay" });
       return v;
@@ -811,7 +833,7 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), o
         if (hasAny) {
           const t0c = Date.now();
           cacheSet(cacheKey, fullData, STREAM_TTL);
-          console.log(`[cache:perf] streams BG cacheSet FULL (${cacheKey}): +${Date.now()-t0c}ms — (aniwaves/animeheaven finalizados)`);
+          if (LOG_PERF_VERBOSE) log.debug(`[cache] streams BG cacheSet FULL (${cacheKey}): +${Date.now()-t0c}ms`);
         }
       })();
     } else {
@@ -827,7 +849,7 @@ async function resolveAnimeData(anilistId, episode, skipProviders = new Set(), o
 
 function buildResolveResult(settled, anilistId, episode, skipProviders, mode = "") {
   const t0 = Date.now();
-  const lap = (label) => console.log(`  [resolveAnime ${anilistId}/${episode}] ${label}: ${Date.now() - t0}ms`);
+  const lap = (label) => { if (LOG_PERF_VERBOSE) log.debug(`[resolveAnime ${anilistId}/${episode}] ${label}: ${Date.now() - t0}ms`); };
 
   const read = (name, fallback) => {
     const r = settled.get(name);
@@ -839,7 +861,7 @@ function buildResolveResult(settled, anilistId, episode, skipProviders, mode = "
 
   // Resumen consolidado
   const providerSummary = [
-    ["animeav1",   read("animeav1", null),    v => `${v?.streams?.length ?? 0} streams`],
+    ["animeav1",   read("animeav1", null),    v => v?._downloadsCacheHit ? `downloads-cache=${countAnimeav1Downloads(v.downloads)}` : `${v?.streams?.length ?? 0} streams`],
     ["megaplay",   read("megaplay", { dub: null, sub: null }),  v => `dub=${!!v?.dub} sub=${!!v?.sub}`],
     ["megavid",    read("megavid", null),   v => (v?.url ? "ok" : "null")],
     ["cuevana",    read("cuevana", []),   v => `${v?.length ?? 0} streams`],
@@ -849,42 +871,43 @@ function buildResolveResult(settled, anilistId, episode, skipProviders, mode = "
     ["animeheaven", read("animeheaven", { sub: [] }), v => `sub=${v?.sub?.length ?? 0}`],
     ["aniskip",    read("aniskip", null),   v => (v ? "ok" : "null")],
   ].map(([name, value, fmt]) => {
-    if (skipProviders.has(name)) return `${name}⊘zenkai`;
+    if (name === "animeav1" && value?._downloadsCacheHit) return `✅ ${name}(${fmt(value)})`;
+    if (skipProviders.has(name)) return `⏭️ ${name}(zenkai)`;
     const reason = reasonOf(name);
-    if (reason) return `${name}✗(${reason.message ?? "?"})`;
-    return `${name}✓(${fmt(value)})`;
+    if (reason) return `❌ ${name}(${reason.message ?? "?"})`;
+    return `✅ ${name}(${fmt(value)})`;
   }).join(" ");
-  console.log(`  [resolveAnime] providers: ${providerSummary}` + (mode ? ` [mode=${mode}]` : ""));
+  log.info(`[anime ${anilistId}/${episode}] providers ${providerSummary}${mode ? ` mode=${mode}` : ""}`);
   lap("summary+unpack start");
   reportAnimeRouteDebug("B", "src/routes/streams.js:resolveAnimeData:done", "[DEBUG] resolveAnimeData done", { anilistId, episode, ms: Date.now() - t0, providerSummary, mode });
 
   const aniskipVal = read("aniskip", null);
-  if (reasonOf("aniskip")) console.warn("[anime] aniskip ✗:", reasonOf("aniskip")?.message);
+  if (reasonOf("aniskip")) log.warn(`[anime ${anilistId}/${episode}] ❌ aniskip fail: ${reasonOf("aniskip")?.message}`);
 
   const latino = read("animeav1", null);
   const hasDubLatino = latino?.streams.some(s => s.type === "dub") ?? false;
   const cuevanaStreams = read("cuevana", []);
-  if (reasonOf("cuevana")) console.warn(`[anime] embed69 ✗:`, reasonOf("cuevana")?.message);
+  if (reasonOf("cuevana")) log.warn(`[anime ${anilistId}/${episode}] ❌ embed69 fail: ${reasonOf("cuevana")?.message}`);
 
   const megaplayBoth = read("megaplay", { dub: null, sub: null });
   const miruro = read("miruro", { dub: null, sub: null });
-  if (reasonOf("miruro")) console.warn("[anime] miruro ✗:", reasonOf("miruro")?.message);
+  if (reasonOf("miruro")) log.warn(`[anime ${anilistId}/${episode}] ❌ miruro fail: ${reasonOf("miruro")?.message}`);
   const anikoto = read("anikoto", { sub: [], dub: [] });
-  if (reasonOf("anikoto")) console.warn("[anime] anikoto ✗:", reasonOf("anikoto")?.message);
+  if (reasonOf("anikoto")) log.warn(`[anime ${anilistId}/${episode}] ❌ anikoto fail: ${reasonOf("anikoto")?.message}`);
   const megavid = read("megavid", null);
-  if (reasonOf("megavid")) console.warn("[anime] megavid ✗:", reasonOf("megavid")?.message);
+  if (reasonOf("megavid")) log.warn(`[anime ${anilistId}/${episode}] ❌ megavid fail: ${reasonOf("megavid")?.message}`);
   const aniwaves = read("aniwaves", { sub: [] });
-  if (reasonOf("aniwaves")) console.warn("[anime] aniwaves ✗:", reasonOf("aniwaves")?.message);
+  if (reasonOf("aniwaves")) log.warn(`[anime ${anilistId}/${episode}] ❌ aniwaves fail: ${reasonOf("aniwaves")?.message}`);
   const animeheaven = read("animeheaven", { sub: [] });
-  if (reasonOf("animeheaven")) console.warn("[anime] animeheaven ✗:", reasonOf("animeheaven")?.message);
+  if (reasonOf("animeheaven")) log.warn(`[anime ${anilistId}/${episode}] ❌ animeheaven fail: ${reasonOf("animeheaven")?.message}`);
 
   lap("summary+unpack done");
-  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, miruro, anikoto, aniwaves, animeheaven, aniskip: aniskipVal };
+  return { megaplayDub: megaplayBoth.dub, megaplaySub: megaplayBoth.sub, megavid, latino, cuevanaStreams, hasDubLatino, miruro, anikoto, aniwaves, animeheaven, aniskip: aniskipVal, _providerSummary: providerSummary, _mode: mode };
 }
 
 async function getReanimeCached(anilistId, episode, cacheKey) {
   const t0 = Date.now();
-  const rlap = (s) => console.log(`  [reanime:perf ${anilistId}/${episode}] ${s}: +${Date.now()-t0}ms`);
+  const rlap = (s) => { if (LOG_PERF_VERBOSE) log.debug(`[reanime:perf ${anilistId}/${episode}] ${s}: +${Date.now()-t0}ms`); };
   const hit = cacheGet(cacheKey);
   if (hit) {
     // #region debug-point D:reanime-cache-hit
@@ -919,7 +942,24 @@ async function getReanimeCached(anilistId, episode, cacheKey) {
       return value;
     } catch (e) {
       rlap(`FAIL: ${e.message}`);
-      console.warn("[anime] reanime ✗:", e.message);
+      log.warn(`[anime ${anilistId}/${episode}] ❌ reanime fail: ${e.message}`);
+      return { sub: null, dub: null };
+    }
+  });
+}
+
+async function getReanimeSubtitleSidecarCached(anilistId, episode, cacheKey) {
+  const t0 = Date.now();
+  const rlap = (s) => { if (LOG_PERF_VERBOSE) log.debug(`[reanime:subs:perf ${anilistId}/${episode}] ${s}: +${Date.now()-t0}ms`); };
+  if (!isProviderEnabled("reanime")) { rlap("disabled"); return { sub: null, dub: null }; }
+  return coalesce(cacheKey, async () => {
+    try {
+      rlap("getReanimeSubtitleSidecar start");
+      const value = await getReanimeSubtitleSidecar(anilistId, episode);
+      rlap(`getReanimeSubtitleSidecar done sub=${Boolean(value?.sub)} dub=${Boolean(value?.dub)}`);
+      return value;
+    } catch (error) {
+      rlap(`FAIL: ${error.message}`);
       return { sub: null, dub: null };
     }
   });
@@ -998,9 +1038,10 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   const proxyBase = getProxyBase(req);
   const perf = createAnimePerfLogger(anilistId, episode);
 
-  // v18: tracks Crunchy persistidos se hidratan desde cr-index.json sin re-scrapear CR.
-  const cacheKey = `streams:anime:v18:${anilistId}:${episode}`;
+  // v19: agrega sidecar liviano de subs Reanime cuando MULTI/Zenkai cubre streams.
+  const cacheKey = `streams:anime:v19:${anilistId}:${episode}`;
   const reanimeCacheKey = `reanime:streams:v11:${anilistId}:${episode}`;
+  const reanimeSubsCacheKey = `reanime:subs-sidecar:v1:${anilistId}:${episode}`;
   const respKey = `resp:${cacheKey}:${proxyBase}`;
   perf.lap("route start (headers set)");
   setSensitiveResponseHeaders(res);
@@ -1008,7 +1049,11 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
   if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
     const cachedBody = cacheGet(respKey);
-    if (cachedBody) { perf.lap("resp cache hit, sending"); return res.type("application/json").send(cachedBody); }
+    if (cachedBody) {
+      perf.lap("resp cache hit, sending");
+      log.info(`[anime ${anilistId}/${episode}] ✅ completado cache=hit bytes=${cachedBody.length} total=${Date.now() - perf.t0}ms`);
+      return res.type("application/json").send(cachedBody);
+    }
     perf.lap("resp cache miss");
   }
 
@@ -1017,12 +1062,19 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   let episodeThumbnails = getEpisodeThumbnails(anilistId, episode);
   perf.lap("r2Archived + episodeThumbnails from cache", { archivedLangs: Object.keys(r2Archived).length, hasThumbs: Boolean(episodeThumbnails) });
   const coveredLangs = new Set();
+  let zenkaiBuiltCount = 0;
+  let zenkaiDroppedCount = 0;
+  let zenkaiVerifyMs = 0;
   if (Object.keys(r2Archived).length) {
     const zenkaiStreams = buildZenkaiStreams(r2Archived, episodeThumbnails);
+    zenkaiBuiltCount = zenkaiStreams.length;
     perf.lap("buildZenkaiStreams done", { count: zenkaiStreams.length, r2Keys: Object.keys(r2Archived) });
-    console.log(`[anime:zenkai] r2 keys raw=${JSON.stringify(Object.keys(r2Archived))} | built langs=${zenkaiStreams.map(s=>s.lang).join(",")}`);
+    if (LOG_PROVIDER_DEBUG) log.debug(`[anime:zenkai ${anilistId}/${episode}] r2=${Object.keys(r2Archived).join(",") || "-"} built=${zenkaiStreams.map(s=>s.lang).join(",") || "-"}`);
     if (zenkaiStreams.length) {
+      const verifyStart = Date.now();
       const ok = await filterPlayableStreams(zenkaiStreams, { allowEmpty: true });
+      zenkaiVerifyMs = Date.now() - verifyStart;
+      zenkaiDroppedCount = zenkaiStreams.length - ok.length;
       for (const s of ok) {
         coveredLangs.add(s.lang);
         if (s.lang === "MULTI" && Array.isArray(s.audioTracks)) {
@@ -1031,23 +1083,20 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
           }
         }
       }
-      console.log(`[anime:zenkai] AFTER verify coveredLangs=${[...coveredLangs].join(",")} | dropped=${zenkaiStreams.length-ok.length} (stream(s) R2 con signature muerta? verify KO)`);
     } else {
-      console.warn(`[anime] zenkai ${anilistId}/${episode}: archivado pero sin URLs firmadas (falta R2_SEAL_SECRET/R2_WORKER_BASE)`);
+      log.warn(`[anime ${anilistId}/${episode}] ⚠️ zenkai archivado pero sin URLs firmadas (falta R2_SEAL_SECRET/R2_WORKER_BASE)`);
     }
   }
   perf.lap("r2 coverage ready", { archivedLangs: Object.keys(r2Archived).length, coveredLangs: coveredLangs.size });
+  const animeav1DownloadsCached = cacheGet(animeav1DownloadsCacheKey(anilistId, episode));
   const skipProviders = new Set(
     Object.entries(PROVIDER_LANGS)
-      // EXCEPCIONES HARD user (2026-10-07): animeav1 NUNCA se skippea, incluso si
-      // Zenkai cubre sus idiomas. User lo requiere "sí o sí". Los demás siguen la regla.
-      .filter(([name]) => name !== "animeav1")
+      // AnimeAV1 aporta descargas; solo se puede saltear si ya las tenemos cacheadas.
+      .filter(([name]) => name !== "animeav1" || Boolean(animeav1DownloadsCached?.downloads))
       .filter(([, langs]) => langs.every((l) => coveredLangs.has(l)))
       .map(([name]) => name)
   );
-  if (skipProviders.size) {
-    console.log(`[anime] zenkai cubre ${[...coveredLangs].join(",")} — skip: ${[...skipProviders].join(",")}`);
-  }
+  log.info(`[anime ${anilistId}/${episode}] ${zenkaiDroppedCount ? "⚠️" : "✅"} zenkai streams=${zenkaiBuiltCount} r2=${Object.keys(r2Archived).join(",") || "-"} covered=${coveredLangs.size ? [...coveredLangs].join(",") : "-"} skip=${skipProviders.size ? [...skipProviders].join(",") : "-"} verify=${zenkaiVerifyMs}ms dropped=${zenkaiDroppedCount}`);
   perf.lap("skipProviders computed", { skipSize: skipProviders.size });
 
   perf.lap("before cacheGet providers");
@@ -1064,8 +1113,8 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     reanimeCacheHit: Boolean(reanimeData),
     skipProviders: [...skipProviders],
   });
-  if (data) console.log(`[anime] ${anilistId}/${episode} servido desde cache (providers no corrieron)`);
-  if (reanimeData) console.log(`[anime] ${anilistId}/${episode} reanime servido desde cache`);
+  if (data) log.info(`[anime ${anilistId}/${episode}] ✅ providers cache=hit`);
+  if (reanimeData) log.info(`[anime ${anilistId}/${episode}] ✅ reanime cache=hit`);
 
   if (!data) {
     perf.lap("data cache miss: will coalesce resolveAnime");
@@ -1077,22 +1126,32 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       if (hasAny && !skipProviders.size) {
         const t0 = Date.now();
         cacheSet(cacheKey, d, STREAM_TTL);
-        console.log(`[cache:perf] streams cacheSet (${cacheKey}): +${Date.now() - t0}ms — JSON approx ${Math.round(JSON.stringify(d).length/1024)}KB`);
+        if (LOG_PERF_VERBOSE) log.debug(`[cache] streams cacheSet (${cacheKey}): +${Date.now() - t0}ms JSON=${Math.round(JSON.stringify(d).length/1024)}KB`);
       }
       return d;
     });
     const reanimePromise = (!reanimeData && !skipProviders.has("reanime"))
       ? getReanimeCached(anilistId, episode, reanimeCacheKey)
       : Promise.resolve(reanimeData);
-    perf.lap("about to await Promise.all dataPromise+reanimePromise");
-    [data, reanimeData] = await Promise.all([dataPromise, reanimePromise]);
+    const reanimeSubsPromise = (!reanimeData && skipProviders.has("reanime"))
+      ? getReanimeSubtitleSidecarCached(anilistId, episode, reanimeSubsCacheKey)
+      : Promise.resolve(null);
+    perf.lap("about to await Promise.all dataPromise+reanimePromise+reanimeSubsPromise");
+    const [resolvedData, resolvedReanime, reanimeSubsData] = await Promise.all([dataPromise, reanimePromise, reanimeSubsPromise]);
+    data = resolvedData;
+    reanimeData = resolvedReanime || reanimeSubsData;
     perf.lap("resolveAnimeData done", { fromCache: false });
     if (!skipProviders.has("reanime")) perf.lap("getReanimeCached done", { fromCache: Boolean(reanimeData) });
+    else perf.lap("getReanimeSubtitleSidecar done", { fromCache: Boolean(reanimeData) });
   } else if (!reanimeData && !skipProviders.has("reanime")) {
     perf.lap("provider data cache hit", { fromCache: true });
     reanimeData = await getReanimeCached(anilistId, episode, reanimeCacheKey);
     cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
     perf.lap("getReanimeCached done", { fromCache: Boolean(reanimeData) });
+  } else if (!reanimeData && skipProviders.has("reanime")) {
+    perf.lap("provider data cache hit: will fetch reanime subtitle sidecar");
+    reanimeData = await getReanimeSubtitleSidecarCached(anilistId, episode, reanimeSubsCacheKey);
+    perf.lap("getReanimeSubtitleSidecar done", { fromCache: Boolean(reanimeData) });
   } else {
     perf.lap("provider caches ready", { dataCache: Boolean(data), reanimeCache: Boolean(reanimeData) });
   }
@@ -1116,8 +1175,10 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     const { megaplayDub, megaplaySub, megavid, latino, cuevanaStreams, miruro, anikoto, aniwaves, animeheaven, aniskip, reanime } = data;
     perf.lap("about to start buildAnimeTracks (in parallel with stream build)");
     const tracksPromise = buildAnimeTracks(anilistId, episode, proxyBase, megaplayDub, megaplaySub, reanime);
-    if (reanimeData) cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
-    if (reanimeData) enqueueReanimeSidecarArchive({ anilistId, episode, reanime: reanimeData, reanimeCacheKey, respKey });
+    const reanimeIsSidecarOnly = skipProviders.has("reanime");
+    const reanimeArchiveCacheKey = reanimeIsSidecarOnly ? reanimeSubsCacheKey : reanimeCacheKey;
+    if (reanimeData && !reanimeIsSidecarOnly) cacheSet(reanimeCacheKey, reanimeData, REANIME_STREAM_TTL);
+    if (reanimeData) enqueueReanimeSidecarArchive({ anilistId, episode, reanime: reanimeData, reanimeCacheKey: reanimeArchiveCacheKey, respKey });
     perf.lap("after enqueue reanime sidecar");
 
     let streams = [];
@@ -1370,11 +1431,11 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
       perf.lap("seal+stringify done", { bytes: builtBody.length, downloads: downloads.length });
       cacheSet(respKey, builtBody, RESP_TTL);
       perf.lap("resp cache stored");
-      return { kind: "built", body: builtBody };
+      return { kind: "built", body: builtBody, meta: { streams: withDisplay.length, tracks: tracks?.length ?? 0, downloads: downloads.length, bytes: builtBody.length, cache: "miss" } };
     }
 
     perf.lap("seal done (no cache, encrypt mode)", { downloads: downloads.length });
-    return { kind: "sealed", sealed };
+    return { kind: "sealed", sealed, meta: { streams: withDisplay.length, tracks: tracks?.length ?? 0, downloads: downloads.length, bytes: null, cache: "miss" } };
   });
 
   if (bodyOrSealed.kind === "cached" || bodyOrSealed.kind === "built") {
@@ -1384,6 +1445,10 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
     res.type("application/json").send(JSON.stringify(envelope));
   }
   perf.lap("response sent");
+  const meta = bodyOrSealed.meta;
+  if (meta) {
+    log.info(`[anime ${anilistId}/${episode}] ✅ completado streams=${meta.streams} tracks=${meta.tracks} downloads=${meta.downloads} bytes=${meta.bytes ?? "-"} total=${Date.now() - perf.t0}ms`);
+  }
 });
 
 export default router;

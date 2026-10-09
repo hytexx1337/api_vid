@@ -1,6 +1,7 @@
 import { createDecipheriv } from "crypto";
 import fs from "fs";
 import { ANILIST_HEADERS } from "../config/constants.js";
+import { LOG_PROVIDER_DEBUG, log, shortUrl } from "../lib/logger.js";
 import { voeToM3U8 } from "./voe.js";
 
 const ANIMEAV1_BASE = "https://animeav1.com/media";
@@ -218,7 +219,7 @@ async function resolveAnilistInfo(anilistId) {
       format:       j.mappings?.type ?? null,
       year:         airDate ? parseInt(airDate.slice(0, 4), 10) : null,
     };
-    console.log(`[scraper] ani.zip fallback OK para ${anilistId}: "${result.titleRomaji}" mal=${result.idMal} y=${result.year}`);
+    if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] ani.zip fallback OK para ${anilistId}: "${result.titleRomaji}" mal=${result.idMal} y=${result.year}`);
   }
 
   cacheSet(key, result, 7 * 24 * 60 * 60 * 1000);
@@ -568,7 +569,7 @@ async function resolveMalIdToSlug(malId, titleRomaji, titleEnglish, anilistYear)
         : malTitle.replace(/\b\d+(?:st|nd|rd|th)\s+season\b/gi, "").replace(/[!]/g, "").trim();
 
       const results = await search(keywords);
-      console.log(`[scraper] search "${keywords}" → ${results.map(r => r.slug).join(", ") || "(sin resultados)"}`);
+      if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] search "${keywords}" -> ${results.map(r => r.slug).join(", ") || "(sin resultados)"}`);
       batches.push(results);
 
       // Con títulos que tienen ":", la query corta ("Rurouni Kenshin") puede
@@ -618,12 +619,12 @@ async function resolveMalIdToSlug(malId, titleRomaji, titleEnglish, anilistYear)
       if (y === anilistYear) { slug = c; break; }
     }
     if (slug && slug !== candidates[0]) {
-      console.log(`[scraper] malId=${malId} → "${candidates[0]}" descartado por año (página dice ${years.get(candidates[0]) ?? "?"}, AniList ${anilistYear}) → "${slug}"`);
+    if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] malId=${malId} descartado por año "${candidates[0]}" -> "${slug}"`);
     }
   }
   slug ??= candidates[0] ?? null;
   if (slug) {
-    console.log(`[scraper] malId=${malId} → slug="${slug}" (de ${entries.length} candidatos)`);
+    if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] malId=${malId} -> slug="${slug}" (${entries.length} candidatos)`);
     cacheSet(key, slug, 7 * 24 * 60 * 60 * 1000);
     // #region debug-point B:slug-selected
     reportAnimeAv1Debug("B", "src/providers/scraper.js:resolveMalIdToSlug:selected", "[DEBUG] animeav1 slug resolved", { key, malId, slug, candidateCount: entries.length });
@@ -638,9 +639,9 @@ async function resolveMalIdToSlug(malId, titleRomaji, titleEnglish, anilistYear)
   const romajiTitle = titleCandidates[0];
   if (romajiTitle) {
     for (const candidateSlug of buildSlugFallbacks(romajiTitle)) {
-      console.log(`[scraper] malId=${malId} → probando slug construido: "${candidateSlug}"`);
+      if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] malId=${malId} probando slug construido "${candidateSlug}"`);
       if (await probeSlug(candidateSlug)) {
-        console.log(`[scraper] malId=${malId} → slug construido confirmado: "${candidateSlug}"`);
+        if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] malId=${malId} slug construido confirmado "${candidateSlug}"`);
         cacheSet(key, candidateSlug, 7 * 24 * 60 * 60 * 1000);
         return candidateSlug;
       }
@@ -741,14 +742,14 @@ async function scrapeM3U8(slug, episode) {
     // #region debug-point A:scrape-cache-hit
     reportAnimeAv1Debug("A", "src/providers/scraper.js:scrapeM3U8:hit", "[DEBUG] animeav1 stream cache hit", { cacheKey, slug, episode, streamCount: cached?.streams?.length ?? 0 });
     // #endregion
-    console.log(`  [scraper:perf] ${slug}/${episode} cache hit ✅`);
+    if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] ${slug}/${episode} cache hit`);
     return cached;
   }
   // #region debug-point A:scrape-cache-miss
   reportAnimeAv1Debug("A", "src/providers/scraper.js:scrapeM3U8:miss", "[DEBUG] animeav1 stream cache miss", { cacheKey, slug, episode });
   // #endregion
   const t0 = Date.now();
-  const lap = (l) => console.log(`  [scraper:perf] ${slug}/${episode} ${l}: +${Date.now() - t0}ms`);
+  const lap = (l) => { if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] ${slug}/${episode} ${l}: +${Date.now() - t0}ms`); };
 
   const epNum = parseInt(episode);
 
@@ -761,7 +762,7 @@ async function scrapeM3U8(slug, episode) {
     const pageUrl = `${ANIMEAV1_BASE}/${slug}/${ep}`;
     res = await fetch(pageUrl, { headers: PAGE_HEADERS, signal: AbortSignal.timeout(15000) });
     if (res.ok) { usedEp = ep; break; }
-    console.warn(`[scraper] 404 en ${slug}/${ep}, probando siguiente...`);
+    if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] 404 en ${slug}/${ep}, probando siguiente...`);
   }
   lap(`page-fetch status=${res.status}`);
 
@@ -781,7 +782,7 @@ async function scrapeM3U8(slug, episode) {
   const downloads  = extractDownloadLinks(html);
   lap(`extract-urls dub(HLS=${dubUrls.length} UPN=${dubUpnUrls.length} Voe=${dubVoeUrls.length} MP4U=${dubMp4uUrls.length}) sub(HLS=${subUrls.length} UPN=${subUpnUrls.length} Voe=${subVoeUrls.length} MP4U=${subMp4uUrls.length})`);
 
-  console.log(`[scraper] slug=${slug} ep=${usedEp} | DUB HLS=${dubUrls.length} UPN=${dubUpnUrls.length} Voe=${dubVoeUrls.length} MP4U=${dubMp4uUrls.length} | SUB HLS=${subUrls.length} UPN=${subUpnUrls.length} Voe=${subVoeUrls.length} MP4U=${subMp4uUrls.length}`);
+  if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] ${slug}/${usedEp} links dub=${dubUrls.length}+${dubUpnUrls.length}+${dubVoeUrls.length}+${dubMp4uUrls.length} sub=${subUrls.length}+${subUpnUrls.length}+${subVoeUrls.length}+${subMp4uUrls.length}`);
 
   if (dubUrls.length === 0 && subUrls.length === 0 && dubUpnUrls.length === 0 && subUpnUrls.length === 0 && dubVoeUrls.length === 0 && subVoeUrls.length === 0 && dubMp4uUrls.length === 0 && subMp4uUrls.length === 0) {
     throw new Error("No player URLs found in page HTML");
@@ -805,7 +806,7 @@ async function scrapeM3U8(slug, episode) {
     results.forEach((upn, i) => {
       if (!upn?.url) return;
       const serverNum = baseCount + i + 1;
-      console.log(`[scraper] UPNShare(${type}) server${serverNum}: ${upn.url}`);
+      log.trace(`[scraper] UPNShare(${type}) server${serverNum}: ${shortUrl(upn.url)}`);
       streamsOut.push({
         url:          upn.url,
         type,
@@ -821,7 +822,7 @@ async function scrapeM3U8(slug, episode) {
     results.forEach((voe, i) => {
       if (!voe?.url) return;
       const serverNum = baseCount + i + 1;
-      console.log(`[scraper] Voe(${type}) server${serverNum}: ${voe.url}`);
+      log.trace(`[scraper] Voe(${type}) server${serverNum}: ${shortUrl(voe.url)}`);
       streamsOut.push({
         url:          voe.url,
         type,
@@ -837,7 +838,7 @@ async function scrapeM3U8(slug, episode) {
     results.forEach((mp4u, i) => {
       if (!mp4u?.url) return;
       const serverNum = baseCount + i + 1;
-      console.log(`[scraper] MP4Upload(${type}) server${serverNum}: ${mp4u.url}`);
+      log.trace(`[scraper] MP4Upload(${type}) server${serverNum}: ${shortUrl(mp4u.url)}`);
       streamsOut.push({
         url:          mp4u.url,
         type,
@@ -873,7 +874,7 @@ async function scrapeM3U8(slug, episode) {
     Promise.all(subMp4uFutures),
   ]).then(arr => {
     const [du, su, dv, sv, dm, sm] = arr;
-    console.log(`[scraper:perf] slow-extractors ALL done UPN(${du.filter(Boolean).length}/${du.length} Voe ${dv.filter(Boolean).length} MP4U ${dm.filter(Boolean).length}) +${Date.now()-slowExtractorsStarted}ms`);
+    if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] slow-extractors done upn=${du.filter(Boolean).length}/${du.length} voe=${dv.filter(Boolean).length} mp4u=${dm.filter(Boolean).length} ${Date.now()-slowExtractorsStarted}ms`);
     return arr;
   });
 
@@ -897,19 +898,19 @@ async function scrapeM3U8(slug, episode) {
       try {
         const arr = await slowAllPromise;
         const fullOut = buildStreams(arr);
-        fullOut.forEach(s => console.log(`[scraper] m3u8 bg (${s.type} srv${s.server}): ${s.url}`));
+        fullOut.forEach(s => log.trace(`[scraper] m3u8 bg (${s.type} srv${s.server}): ${shortUrl(s.url)}`));
         const streamsTtl = 15 * 60 * 1000;
         const full = { streams: fullOut, downloads };
         cacheSet(cacheKey, full, streamsTtl);
         if (usedEp !== epNum) cacheSet(`m3u8:${slug}:${usedEp}`, full, streamsTtl);
-        console.log(`[scraper:perf] slow-extractors CACHE UPDATED (prox hit tendrá UPN/Voe/MP4U)`);
+        if (LOG_PROVIDER_DEBUG) log.debug("[scraper] slow-extractors cache updated");
       } catch (e) {
         console.warn(`[scraper:perf] slow-extractors bg update error: ${e.message}`);
       }
     })();
   }
 
-  finalStreams.forEach(s => console.log(`[scraper] m3u8 (${s.type} srv${s.server}): ${s.url}`));
+  finalStreams.forEach(s => log.trace(`[scraper] m3u8 (${s.type} srv${s.server}): ${shortUrl(s.url)}`));
   const streamsTtl = 15 * 60 * 1000;
   const result = { streams: finalStreams, downloads };
   cacheSet(cacheKey, result, streamsTtl);
@@ -1002,7 +1003,7 @@ async function resolveEpisodeOffset(anilistId) {
           { method: "HEAD", headers: PAGE_HEADERS, signal: AbortSignal.timeout(6000), redirect: "follow" }
         );
         confirmedSplitCours = probeResp.ok; // 200 → existe → split-cours real
-        console.log(`[scraper] split-cours probe: /media/${currentSlug}/${probeEp} → ${probeResp.status} → ${confirmedSplitCours ? "split-cours REAL" : "NO split-cours (season separada)"}`);
+        if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] split-cours probe /media/${currentSlug}/${probeEp} -> ${probeResp.status} -> ${confirmedSplitCours ? "real" : "no"}`);
       } catch (e) {
         // Si falla el probe, asumimos que no es split-cours (más seguro)
         console.warn(`[scraper] split-cours probe falló para "${currentSlug}":`, e.message);
@@ -1027,9 +1028,9 @@ async function resolveEpisodeOffset(anilistId) {
         }
         if (hasEp0Special) {
           offset = prequelNode.episodes - 1;
-          console.log(`[scraper] split-cours + ep0 especial → offset ajustado ${prequelNode.episodes} → ${offset}`);
+          if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] split-cours ep0 especial offset ${prequelNode.episodes} -> ${offset}`);
         }
-        console.log(`[scraper] split-cours confirmado: anilist=${anilistId} → offset=${offset} (prequel idMal=${prequelNode.idMal}, slug="${currentSlug}")`);
+        if (LOG_PROVIDER_DEBUG) log.debug(`[scraper] split-cours confirmado anilist=${anilistId} offset=${offset} slug="${currentSlug}"`);
         cacheSet(key, offset, TTL);
         // #region debug-point B:offset-resolved
         reportAnimeAv1Debug("B", "src/providers/scraper.js:resolveEpisodeOffset:resolved", "[DEBUG] animeav1 offset resolved", { key, anilistId, offset, reason: "split-cours" });
@@ -1053,7 +1054,7 @@ async function resolveEpisodeOffset(anilistId) {
 
 export async function getLatinoStream(anilistId, episode) {
   const t0 = Date.now();
-  const lap = (l) => console.log(`  [latino ${anilistId}/${episode}] ${l}: ${Date.now()-t0}ms`);
+  const lap = (l) => { if (LOG_PROVIDER_DEBUG) log.debug(`[latino ${anilistId}/${episode}] ${l}: ${Date.now()-t0}ms`); };
   // #region debug-point B:getLatino-start
   reportAnimeAv1Debug("B", "src/providers/scraper.js:getLatinoStream:start", "[DEBUG] animeav1 provider start", { anilistId, episode });
   // #endregion
@@ -1072,7 +1073,7 @@ export async function getLatinoStream(anilistId, episode) {
   lap(`metadata+slug+offset (slug="${slug}", malId=${malId}, offset=${offset})`);
 
   const epNum = Number(episode) + offset;
-  if (offset > 0) console.log(`[scraper] split-cours: ep local ${episode} → ep animeav1 ${epNum} (offset=${offset})`);
+  if (offset > 0 && LOG_PROVIDER_DEBUG) log.debug(`[scraper] split-cours ep local ${episode} -> animeav1 ${epNum} (offset=${offset})`);
 
   const { streams, downloads } = await scrapeM3U8(slug, epNum);
   lap("scrapeM3U8");

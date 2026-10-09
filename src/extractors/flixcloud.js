@@ -1,4 +1,5 @@
 import { webcrypto as crypto } from "node:crypto";
+import { LOG_PROVIDER_DEBUG, log } from "../lib/logger.js";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -315,9 +316,23 @@ async function runDecryptWasm(wasmBytes, fragment, keyFragment, token, seed) {
   return { out, manifestKey, debug: `exports=[${exportNames.join(",")}] _c=${pkPtr}` };
 }
 
+export function extractFlixcloudSidecar(embedHtml) {
+  const data = parseJsLiteral(extractSsrObj(embedHtml));
+  return {
+    subtitles: data.subtitles ?? [],
+    available_fonts: data.available_fonts ?? {},
+    extracted_fonts: data.extracted_fonts ?? [],
+    thumbnails_vtt: data.thumbnails_vtt ?? null,
+    video_title: data.video_title ?? null,
+    intro_chapter: data.intro_chapter ?? null,
+    outro_chapter: data.outro_chapter ?? null,
+    video_id: data.video_id ?? null,
+  };
+}
+
 export async function extractFlixcloud(embedHtml, { fetchImpl = fetch, apiBase = "https://flixcloud.cc", headers = {}, referer } = {}) {
   const t0 = Date.now();
-  const fl = (s) => console.log(`    [flixcloud:extract] ${s}: +${Date.now()-t0}ms`);
+  const fl = (s) => { if (LOG_PROVIDER_DEBUG) log.debug(`[flixcloud:extract] ${s}: +${Date.now()-t0}ms`); };
   fl("start");
   const data = parseJsLiteral(extractSsrObj(embedHtml));
   fl(`SSR parsed (subs=${data.subtitles?.length??0}, fonts=${Object.keys(data.available_fonts??{}).length}, vtt=${Boolean(data.thumbnails_vtt)})`);

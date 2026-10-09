@@ -18,6 +18,6 @@ export { getVidyStream } from "./scraper-vidy.js";
 export { getVidstuckStream } from "./scraper-vidstuck.js";
 export { getVidcoreStream, getVidrkSubs } from "./scraper-vidcore.js";
 export { getVixsrcStream } from "./scraper-vixsrc.js";
-export { getReanimeStreams } from "./reanime.js";
+export { getReanimeStreams, getReanimeSubtitleSidecar } from "./reanime.js";
 export { getAniwavesStreams } from "./scraper-aniwaves.js";
 export { getAnimeheavenStreams } from "./scraper-animeheaven.js";

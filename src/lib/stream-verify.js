@@ -10,6 +10,7 @@
  * en cada pedido de la misma página/episodio.
  */
 import { cacheGet, cacheSet } from "./cache.js";
+import { LOG_VERIFY, log, shortUrl } from "./logger.js";
 
 const REQUEST_TIMEOUT_MS = 4_000;
 const VERIFY_TTL_MS = 5 * 60 * 1000;
@@ -57,10 +58,10 @@ async function verifyOne(stream, opts = {}) {
   try {
     if (stream.type === "mp4") await checkSegment(fetchUrl, headers, opts);
     else await verifyHls(fetchUrl, headers, opts);
-    console.log(`[verify:perf] ✅ ${who} ${stream.type} (+${Date.now() - start}ms) ${fetchUrl.slice(0, 100)}`);
+    if (LOG_VERIFY) log.debug(`[verify] ok ${who} ${stream.type} ${Date.now() - start}ms ${shortUrl(fetchUrl)}`);
     return true;
   } catch (e) {
-    console.warn(`[verify:perf] ✗ ${who} ${stream.type} (+${Date.now() - start}ms) ${e.message} — ${fetchUrl.slice(0, 100)}`);
+    if (LOG_VERIFY) log.warn(`[verify] fail ${who} ${stream.type} ${Date.now() - start}ms ${e.message} ${shortUrl(fetchUrl)}`);
     return false;
   }
 }
@@ -119,15 +120,15 @@ export async function filterPlayableStreams(streams, { budgetMs = VERIFY_BUDGET_
     try { proxyTest = new URL(s.proxy_url || ""); } catch {}
     const isRiverAlias = Boolean(proxyTest && (proxyTest.pathname === "/river.m3u8" || proxyTest.pathname.startsWith("/river-seg")));
     if (isRiverAlias) {
-      console.log(`[verify:perf] 🏠 skip river-alias ${who} (proxy local sellado)`);
+      if (LOG_VERIFY) log.debug(`[verify] skip river-alias ${who}`);
       return true;
     }
     if (s.type === "mp4") {
-      console.log(`[verify:perf] 🎥 skip mp4-verify ${who} (HEAD caro, incluimos optimista)`);
+      if (LOG_VERIFY) log.debug(`[verify] skip mp4 ${who}`);
       return true;
     }
     if (cached !== null && cached !== undefined) {
-      console.log(`[verify:perf] ⚡ cache ${who}: ${cached ? "OK" : "KO"}`);
+      if (LOG_VERIFY) log.debug(`[verify] cache ${who}: ${cached ? "ok" : "ko"}`);
       return cached;
     }
     const perStreamBudget = PER_STREAM_TIMEOUT_MS;
@@ -135,7 +136,7 @@ export async function filterPlayableStreams(streams, { budgetMs = VERIFY_BUDGET_
     const globalDeadline = deadline;
     const effectiveDeadline = Math.min(perStreamDeadline, globalDeadline);
     const remaining = effectiveDeadline - Date.now();
-    if (remaining <= 0) { timedOut++; console.warn(`[verify:perf] ⏱ PER-STREAM-TIMEOUT ${who}`); return true; }
+    if (remaining <= 0) { timedOut++; if (LOG_VERIFY) log.warn(`[verify] timeout ${who}`); return true; }
     const ac = new AbortController();
     const abortTimer = setTimeout(() => ac.abort(), remaining);
     const inFlight = pendingVerify.get(cacheKey);
@@ -146,7 +147,7 @@ export async function filterPlayableStreams(streams, { budgetMs = VERIFY_BUDGET_
       if (r === "__timeout__") {
         if (!inFlight) ac.abort();
         timedOut++;
-        console.warn(`[verify:perf] ⏱ PER-STREAM-TIMEOUT ${who} (budget=${perStreamBudget}) (+${Date.now() - sStart}ms)`);
+        if (LOG_VERIFY) log.warn(`[verify] timeout ${who} budget=${perStreamBudget}ms elapsed=${Date.now() - sStart}ms`);
         return true;
       }
       return r;
@@ -157,12 +158,12 @@ export async function filterPlayableStreams(streams, { budgetMs = VERIFY_BUDGET_
   }));
   const playable = streams.filter((_, i) => results[i]);
   const dropped = streams.filter((_, i) => !results[i]);
-  console.log(`[verify:perf] total ${streams.length} streams — budget=${budgetMs}ms elapsed=+${Date.now() - start}ms — ✅${playable.length} ✗${dropped.length} ⏱${timedOut}`);
+  if (LOG_VERIFY) log.debug(`[verify] total streams=${streams.length} playable=${playable.length} dropped=${dropped.length} timeout=${timedOut} ${Date.now() - start}ms`);
   if (dropped.length) {
-    console.warn(`[verify] filtrados ${dropped.length}/${streams.length}: ${dropped.map(s => s.originalProvider || s.provider || "?").join(", ")}`);
+    log.warn(`[verify] ⚠️ filtrados ${dropped.length}/${streams.length}: ${dropped.map(s => s.originalProvider || s.provider || "?").join(", ")}`);
   }
   if (timedOut) {
-    console.warn(`[verify] budget ${budgetMs}ms — ${timedOut} stream(s) sin verificar a tiempo (incluidos optimistas)`);
+    log.warn(`[verify] ⚠️ budget ${budgetMs}ms — ${timedOut} stream(s) sin verificar a tiempo (incluidos optimistas)`);
   }
   return (playable.length > 0 || allowEmpty) ? playable : streams;
 }

@@ -85,7 +85,7 @@ export function detectSubtitleMeta(rawLabel, fileUrlOrPath, originalKindHint) {
   const aiStrong = /\bai\b/i.test(raw.replace(/[()\[\]]/g, " ").replace(/\s+/g, " "));
   if (aiStrong && !ai) ai = true;
   let cc = /(\bcc\b|closed[\s_-]?captions?|sdh|\bcaptions?\b)/i.test(raw) || /\bcc\b/i.test(String(originalKindHint || ""));
-  let forced = /(\bforced\b|foreign[\s_-]?only|\bfull\b)/i.test(raw) || /(^|[\s_-])f([\s_-]|$)/.test(s);
+  let forced = /(\bforced\b|foreign[\s_-]?only|\bfull\b(?!\s*subtitles?\b))/i.test(raw) || /(^|[\s_-])f([\s_-]|$)/.test(s);
 
   // Dubtitle AI = tipo subtitles (no captions) + flag ai=true
   const isDubtitle = /\bdubtitle\b/i.test(raw);
