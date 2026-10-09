@@ -69,6 +69,20 @@ test("normaliza episodio OVH publicado, subtitulos y thumbnails", () => {
   assert.equal(tracks.find((t) => t.url.endsWith(".ass")).type, "ass");
 });
 
+test("parsea audioTracks OVH desde master HLS", () => {
+  const tracks = ovh.parseOvhAudioTracksFromMaster(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="en-US",NAME="English",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2",URI="a0.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="es-419",NAME="Español (América Latina)",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2",URI="a1.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="ja-JP",NAME="日本語",DEFAULT=NO,AUTOSELECT=YES,CHANNELS="2",URI="a2.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,AUDIO="audio"
+v0.m3u8`);
+  assert.deepEqual(tracks, [
+    { id: "en", lang: "en-US", code: "ENG-DUB", label: "Inglés", default: true, dub: true },
+    { id: "es-MX", lang: "es-MX", code: "ESP-LAT", label: "Latino", default: false, dub: true },
+    { id: "ja", lang: "ja-JP", code: "JAP-SUB", label: "Japonés", default: false, original: true },
+  ]);
+});
+
 test("cliente OVH maneja lookup, 404 temporal y auth errors", async () => {
   const lookup = await ovh.lookupOvhEpisodes(["112641-8-multi"], {
     fetchImpl: async (_url, opts) => {
@@ -180,9 +194,15 @@ test("discovery OVH consulta y persiste un episodio publicado que no estaba en S
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = async (url, opts) => {
-      assert.match(String(url), /\/v1\/episodes\/777-3-multi$/);
-      assert.equal(opts.headers["X-Ingest-Key"], "ingest-key");
-      return new Response(JSON.stringify({ ...publishedEpisode, slug: "777-3-multi" }), { status: 200 });
+      if (String(url).includes("/v1/episodes/")) {
+        assert.match(String(url), /\/v1\/episodes\/777-3-multi$/);
+        assert.equal(opts.headers["X-Ingest-Key"], "ingest-key");
+        return new Response(JSON.stringify({ ...publishedEpisode, slug: "777-3-multi" }), { status: 200 });
+      }
+      return new Response(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="en-US",NAME="English",DEFAULT=YES,URI="a0.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="es-419",NAME="Español (América Latina)",DEFAULT=NO,URI="a1.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",LANGUAGE="ja-JP",NAME="日本語",DEFAULT=NO,URI="a2.m3u8"`, { status: 200 });
     };
     const result = await sync.discoverOvhArchiveForEpisode(777, 3, { retries: 0, timeoutMs: 1000 });
     assert.equal(result.status, "published");
@@ -191,6 +211,8 @@ test("discovery OVH consulta y persiste un episodio publicado que no estaba en S
     assert.equal(row.status, "published");
     assert.equal(row.slug, "777-3-multi");
     assert.equal(row.subtitles.length, 3);
+    assert.equal(row.audioTracks.length, 3);
+    assert.equal(row.audioTracks[1].code, "ESP-LAT");
     assert.equal(cache.getOvhArchiveBySlug("777-3-multi").hls.available, true);
   } finally {
     globalThis.fetch = originalFetch;

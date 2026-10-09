@@ -421,18 +421,18 @@ function pickArchiveCandidates(streams, lang, priorityList) {
   return ordered;
 }
 
-function multiArchiveCoversLang(r2Archived, lang) {
-  const tracks = r2Archived?.MULTI?.audioTracks;
+function multiArchiveCoversLang(archived, lang) {
+  const tracks = archived?.MULTI?.audioTracks;
   if (!Array.isArray(tracks) || !tracks.length) return false;
   return tracks.some((track) => {
     return coveredLangCodesFromAudioTrack(track).has(lang);
   });
 }
 
-function archiveLangAlreadyCovered(r2Archived, lang) {
-  if (r2Archived?.[lang]) return true;
+function archiveLangAlreadyCovered(r2Archived, ovhArchived, lang) {
+  if (r2Archived?.[lang] || ovhArchived?.[lang]) return true;
   if (lang === "ENG-DUB" || lang === "ESP-LAT") {
-    return multiArchiveCoversLang(r2Archived, lang);
+    return multiArchiveCoversLang(r2Archived, lang) || multiArchiveCoversLang(ovhArchived, lang);
   }
   return false;
 }
@@ -459,14 +459,14 @@ function buildReanimeRiverProxyUrl(proxyBase, item, { multi = false, audio = nul
 // Encola a R2 los idiomas que todavía no están archivados. proxy_url apunta
 // al dominio público (proxyBase); para el fetch interno del archivador se usa
 // loopback directo, evitando un salto de ida y vuelta por internet.
-function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase) {
+function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase, ovhArchived = {}) {
   // Sin credenciales R2 (ej. .env comentado en dev local) no encolar nada:
   // archiveHlsToR2 fallaría en assertR2Env por cada candidato y solo
   // ensuciaría el log.
   if (!isR2Configured()) return;
   const internalBase = `http://127.0.0.1:${process.env.PORT || 1337}`;
-  let multiQueuedOrCovered = multiArchiveCoversLang(r2Archived, "ENG-DUB");
-  if (!r2Archived.MULTI && !isQueuedOrArchiving(anilistId, episode, "MULTI")) {
+  let multiQueuedOrCovered = Boolean(r2Archived.MULTI || ovhArchived.MULTI || multiArchiveCoversLang(r2Archived, "ENG-DUB") || multiArchiveCoversLang(ovhArchived, "ENG-DUB"));
+  if (!r2Archived.MULTI && !ovhArchived.MULTI && !isQueuedOrArchiving(anilistId, episode, "MULTI")) {
     const multiCandidates = pickArchiveCandidates(streams, "MULTI", ["reanime"]);
     if (multiCandidates.length) {
       const jobCandidates = multiCandidates.map((c) => ({
@@ -487,7 +487,7 @@ function autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyB
   }
   for (const [lang, priorityList] of Object.entries(R2_AUTO_ARCHIVE_PRIORITY)) {
     if (lang === "ENG-DUB" && multiQueuedOrCovered) continue;
-    if (archiveLangAlreadyCovered(r2Archived, lang)) continue;
+    if (archiveLangAlreadyCovered(r2Archived, ovhArchived, lang)) continue;
     if (isQueuedOrArchiving(anilistId, episode, lang)) continue;
     const candidates = pickArchiveCandidates(streams, lang, priorityList);
     if (!candidates.length) continue;
@@ -1027,7 +1027,8 @@ export function buildZenkaiStreams(r2Archived, episodeThumbnails = {}, ovhArchiv
         originalProvider: "zenkai",
         storageProvider: "ovh",
         sourceProvider: entry.sourceProvider,
-        ...(isMulti && Array.isArray(entry.audioTracks) && entry.audioTracks.length && { multiAudio: true, audioTracks: entry.audioTracks }),
+        ...(isMulti && { multiAudio: true }),
+        ...(isMulti && Array.isArray(entry.audioTracks) && entry.audioTracks.length && { audioTracks: entry.audioTracks }),
         ...(isMulti && Array.isArray(entry.subtitleTracks) && entry.subtitleTracks.length && { subtitleTracks: entry.subtitleTracks }),
         proxy_url: signedUrl,
         verifyKey: `ovh:${entry.slug}`,
@@ -1478,7 +1479,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
 
     if (streams.length === 0) throw Object.assign(new Error("No streams found for this episode"), { status: 404 });
 
-    autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase);
+    autoArchiveMissingLangs(anilistId, episode, streams, r2Archived, proxyBase, ovhArchived);
 
     const isDubLang = (lang) => isDubLikeLang(lang);
     const megaplayDubSkip = megaplayDub && Object.keys(megaplayDub.skip || {}).length ? megaplayDub.skip : null;

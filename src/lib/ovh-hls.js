@@ -156,6 +156,61 @@ export function isOvhEpisodePublished(episode) {
   return episode?.status === "published" && episode?.hls?.available === true;
 }
 
+function parseHlsAttributeList(line) {
+  const out = {};
+  for (const match of String(line || "").matchAll(/([A-Z0-9-]+)=("[^"]*"|[^,]*)/g)) {
+    out[match[1]] = String(match[2] || "").replace(/^"|"$/g, "");
+  }
+  return out;
+}
+
+function audioTrackFromHlsMedia(attrs) {
+  const language = String(attrs.LANGUAGE || "").trim();
+  const name = String(attrs.NAME || "").trim();
+  const lower = `${language} ${name}`.toLowerCase();
+  const base = {
+    default: String(attrs.DEFAULT || "").toUpperCase() === "YES",
+  };
+  if (lower.includes("es-419") || lower.includes("es-mx") || lower.includes("español") || lower.includes("latina")) {
+    return { id: "es-MX", lang: "es-MX", code: "ESP-LAT", label: "Latino", ...base, dub: true };
+  }
+  if (lower.includes("en-us") || lower.includes("english") || lower === "en") {
+    return { id: "en", lang: "en-US", code: "ENG-DUB", label: "Inglés", ...base, dub: true };
+  }
+  if (lower.includes("ja-jp") || lower.includes("japanese") || lower.includes("日本") || lower === "ja") {
+    return { id: "ja", lang: "ja-JP", code: "JAP-SUB", label: "Japonés", ...base, original: true };
+  }
+  return language || name ? { id: language || name, lang: language, code: language.toUpperCase(), label: name || language, ...base } : null;
+}
+
+export function parseOvhAudioTracksFromMaster(text) {
+  const seen = new Set();
+  const out = [];
+  for (const line of String(text || "").split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("#EXT-X-MEDIA") || !/TYPE=AUDIO/i.test(trimmed)) continue;
+    const track = audioTrackFromHlsMedia(parseHlsAttributeList(trimmed));
+    if (!track?.code || seen.has(track.code)) continue;
+    seen.add(track.code);
+    out.push(track);
+  }
+  return out;
+}
+
+export async function fetchOvhAudioTracks(slug, { fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetchImpl(signOvhHlsUrl(slug), { signal: controller.signal });
+    if (!res.ok) return [];
+    return parseOvhAudioTracksFromMaster(await res.text());
+  } catch {
+    return [];
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function classifyOvhHttpError(status) {
   if (status === 404) return { temporary: true, message: "OVH episode not published yet" };
   if (status === 401 || status === 403) return { authError: true, message: `OVH auth HTTP ${status}` };

@@ -5,7 +5,7 @@ import {
   listDueOvhArchives,
   upsertOvhArchive,
 } from "./cache.js";
-import { fetchOvhEpisode, isOvhEpisodePublished } from "./ovh-hls.js";
+import { fetchOvhAudioTracks, fetchOvhEpisode, isOvhEpisodePublished } from "./ovh-hls.js";
 import { log } from "./logger.js";
 
 const SYNC_INTERVAL_MS = Number(process.env.OVH_SYNC_INTERVAL_MS || 30_000);
@@ -24,14 +24,14 @@ export function computeOvhBackoffMs(attempts = 0) {
   return Math.min(MAX_BACKOFF_MS, INITIAL_BACKOFF_MS * (2 ** exponent));
 }
 
-function archiveTracksFromRecord(record) {
+function archiveTracksFromRecord(record, fallbackAudioTracks = []) {
   return {
-    audioTracks: Array.isArray(record?.audioTracks) ? record.audioTracks : [],
+    audioTracks: Array.isArray(record?.audioTracks) && record.audioTracks.length ? record.audioTracks : fallbackAudioTracks,
     subtitleTracks: Array.isArray(record?.subtitleTracks) ? record.subtitleTracks : [],
   };
 }
 
-function publishedFieldsFromEpisode(episode, record) {
+function publishedFieldsFromEpisode(episode, record, fallbackAudioTracks = []) {
   const hlsBytes = episode?.hls?.size_bytes ?? null;
   return {
     animeId: record.animeId,
@@ -45,7 +45,7 @@ function publishedFieldsFromEpisode(episode, record) {
     assetsStatus: "published",
     skipIntro: record.skipIntro ?? null,
     skipOutro: record.skipOutro ?? null,
-    tracks: archiveTracksFromRecord(record),
+    tracks: archiveTracksFromRecord(record, fallbackAudioTracks),
     subtitles: episode?.subtitles ?? [],
     thumbnails: episode?.thumbnails ?? null,
     hls: episode?.hls ?? null,
@@ -90,7 +90,10 @@ export async function syncOvhArchive(recordOrSlug, { timeoutMs = WORKER_SYNC_TIM
   try {
     const result = await fetchOvhEpisode(record.slug, { timeoutMs, retries });
     if (result.ok && isOvhEpisodePublished(result.episode)) {
-      upsertOvhArchive(publishedFieldsFromEpisode(result.episode, record));
+      const inferredAudioTracks = Array.isArray(record.audioTracks) && record.audioTracks.length
+        ? []
+        : await fetchOvhAudioTracks(record.slug, { timeoutMs });
+      upsertOvhArchive(publishedFieldsFromEpisode(result.episode, record, inferredAudioTracks));
       cacheDeleteAnimeResponseCache(record.animeId, record.episode);
       log.info(`[ovh ${record.animeId}/${record.episode}] ✅ published slug=${record.slug}`);
       return { ok: true, status: "published", slug: record.slug, episode: result.episode };
@@ -147,6 +150,9 @@ export async function discoverOvhArchiveForEpisode(animeId, episode, { timeoutMs
   const slug = buildOvhArchiveSlug(animeId, episode);
   const existing = getOvhArchiveBySlug(slug) || getOvhArchive(animeId, episode, { publishedOnly: false }).MULTI;
   if (existing?.status === "published") {
+    if (force || !Array.isArray(existing.audioTracks) || !existing.audioTracks.length) {
+      return syncOvhArchive(existing, { timeoutMs, retries });
+    }
     return { ok: true, status: "published", slug, archive: existing, discovered: false };
   }
   if (existing && !force) {
