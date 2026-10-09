@@ -1092,6 +1092,25 @@ export function selectPreferredZenkaiStreams(streams) {
   return [...zenkaiByLang.values(), ...out];
 }
 
+function shouldRefreshOvhArchive(ovhArchived) {
+  if (!Object.keys(ovhArchived || {}).length) return true;
+  const multi = ovhArchived?.MULTI;
+  return multi?.status === "published" && (!Array.isArray(multi.audioTracks) || !multi.audioTracks.length);
+}
+
+function hasStaleOvhMultiResponseCache(rawBody) {
+  try {
+    const body = typeof rawBody === "string" ? JSON.parse(rawBody) : rawBody;
+    return Array.isArray(body?.streams) && body.streams.some((stream) => (
+      stream?.storageProvider === "ovh"
+      && stream?.lang === "MULTI"
+      && (!Array.isArray(stream.audioTracks) || !stream.audioTracks.length)
+    ));
+  } catch {
+    return false;
+  }
+}
+
 // Langs normalizados que cada provider puede producir (ver normalizeLang).
 // Si TODOS los langs de un provider están cubiertos por zenkai verificado,
 // el provider no se scrapea. JAP-SUB nunca está archivado → megaplay,
@@ -1125,9 +1144,14 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   if (!PLAYER_STREAM_ENCRYPTION_ENABLED) {
     const cachedBody = cacheGet(respKey);
     if (cachedBody) {
+      if (hasStaleOvhMultiResponseCache(cachedBody)) {
+        cacheDelete(respKey);
+        perf.lap("resp cache stale ovh multi, rebuilding");
+      } else {
       perf.lap("resp cache hit, sending");
       log.info(`[anime ${anilistId}/${episode}] ✅ completado cache=hit bytes=${cachedBody.length} total=${Date.now() - perf.t0}ms`);
       return res.type("application/json").send(cachedBody);
+      }
     }
     perf.lap("resp cache miss");
   }
@@ -1135,7 +1159,7 @@ router.get("/anime/:anilistId/:episode", async (req, res) => {
   perf.lap("before r2 archive + thumbs");
   const r2Archived = getR2Archive(anilistId, episode);
   let ovhArchived = getOvhArchive(anilistId, episode);
-  if (!Object.keys(ovhArchived).length) {
+  if (shouldRefreshOvhArchive(ovhArchived)) {
     const discovery = await discoverOvhArchiveForEpisode(anilistId, episode);
     if (discovery.status === "published") {
       ovhArchived = getOvhArchive(anilistId, episode);
