@@ -12,19 +12,24 @@ const DEFAULT_BASE = process.env.API_BASE_URL || "http://localhost:1337";
 
 function parseArgs(argv) {
   const args = { base: DEFAULT_BASE, episodes: [], sync: false };
+  const positional = [];
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === "--base") args.base = argv[++i];
     else if (arg === "--episodes") args.episodes = argv[++i].split(",").map(s => s.trim()).filter(Boolean);
     else if (arg === "--sync") args.sync = true;
     else if (arg === "--help" || arg === "-h") args.help = true;
+    else positional.push(arg);
   }
+  if (positional[0] && /^https?:\/\//i.test(positional[0])) args.base = positional.shift();
+  if (!args.episodes.length && positional[0]) args.episodes = positional[0].split(",").map(s => s.trim()).filter(Boolean);
   return args;
 }
 
 function usage() {
   console.log(`Uso:
   node --env-file=.env scripts/ovh-preference-smoke.mjs --base http://localhost:1337 --episodes 112641:2,112641:8 [--sync]
+  npm run ovh:smoke -- http://localhost:1337 112641:2,112641:8
 
 Variables:
   API_KEY        key admin/API usada como ?key=...
