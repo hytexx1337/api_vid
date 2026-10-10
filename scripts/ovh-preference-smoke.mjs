@@ -74,7 +74,11 @@ async function syncOvh(base, key, animeId, episode) {
   const res = await fetch(apiUrl(base, `/admin/api/sync-ovh-archive/${slug}`, { key }), { method: "POST" });
   const text = await res.text();
   if (!res.ok) throw new Error(`sync ${slug} HTTP ${res.status}: ${text.slice(0, 300)}`);
-  return text;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { raw: text };
+  }
 }
 
 async function fetchAnime(base, key, animeId, episode) {
@@ -82,6 +86,31 @@ async function fetchAnime(base, key, animeId, episode) {
   const text = await res.text();
   if (!res.ok) throw new Error(`/anime/${animeId}/${episode} HTTP ${res.status}: ${text.slice(0, 300)}`);
   return JSON.parse(text);
+}
+
+function compactSyncSummary(syncResult) {
+  if (!syncResult || typeof syncResult !== "object") return String(syncResult);
+  return JSON.stringify({
+    ok: syncResult.ok,
+    status: syncResult.status,
+    slug: syncResult.slug,
+    error: syncResult.error || null,
+    currentStatus: syncResult.current?.status || null,
+    currentLastError: syncResult.current?.lastError || null,
+    currentAudioTracks: syncResult.current?.audioTracks?.length ?? null,
+    nextSyncAt: syncResult.nextSyncAt || syncResult.current?.nextSyncAt || null,
+  });
+}
+
+function responseShape(data) {
+  if (!data || typeof data !== "object") return typeof data;
+  return JSON.stringify({
+    keys: Object.keys(data).slice(0, 12),
+    encrypted: data.encrypted === true,
+    hasStreams: Array.isArray(data.streams),
+    streamsLen: Array.isArray(data.streams) ? data.streams.length : null,
+    error: data.error || null,
+  });
 }
 
 function analyzeResponse(data) {
@@ -101,6 +130,8 @@ function analyzeResponse(data) {
   const cdnZenkai = zenkai.filter(s => hostOf(s.proxy_url || s.url) === "cdn.zenkai.live");
   const issues = [];
 
+  if (data?.encrypted === true) issues.push("la respuesta vino cifrada; desactivá PLAYER_STREAM_ENCRYPTION_ENABLED para este smoke o probá el endpoint interno sin cifrado");
+  if (!Array.isArray(data?.streams)) issues.push(`la respuesta no trae streams[] shape=${responseShape(data)}`);
   if (!ovhMulti) issues.push("no apareció OVH MULTI");
   if (ovhMulti && (!Array.isArray(ovhMulti.audioTracks) || !ovhMulti.audioTracks.length)) issues.push("OVH MULTI no trae audioTracks");
   if (ovhMulti && first?.verifyKey !== ovhMulti.verifyKey) issues.push(`el primer stream no es OVH MULTI, es ${first?.verifyKey || first?.storageProvider || "unknown"}`);
@@ -135,11 +166,12 @@ for (const item of args.episodes) {
   console.log(`\n[${animeId}/${episode}] probando ${args.base}`);
   try {
     if (args.sync) {
-      await syncOvh(args.base, key, animeId, episode);
-      console.log("  sync OVH: ok");
+      const syncResult = await syncOvh(args.base, key, animeId, episode);
+      console.log(`  sync OVH: ${compactSyncSummary(syncResult)}`);
     }
     const data = await fetchAnime(args.base, key, animeId, episode);
     const result = analyzeResponse(data);
+    console.log(`  response=${responseShape(data)}`);
     console.log(`  streams=${result.summary.streams} zenkai=${result.summary.zenkai}`);
     console.log(`  first=${result.summary.first}`);
     console.log(`  ovhMulti=${result.summary.ovhMulti}`);
